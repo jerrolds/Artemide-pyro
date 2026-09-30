@@ -55,7 +55,7 @@ endif
 
 LOCAL_LDLIBS := -llog
 
-LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures
+LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures pyrowave-android
 LOCAL_LDFLAGS += -Wl,--exclude-libs,ALL
 
 LOCAL_BRANCH_PROTECTION := standard
