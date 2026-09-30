@@ -176,3 +176,22 @@ For the first frame: 8-bit 4:2:0 SDR at 1920×1080, complete frames only
   Adreno 740; step 1 answers it.
 - **Bitstream match.** Must vendor exactly `186f0393`; the bitstream has no version field.
 - **Colour.** Match `encoderCscMode` range/matrix; the D3D11 HLSL shader is the reference.
+
+## Implementation status
+
+| Step | State |
+|---|---|
+| moonlight-common-c PyroWave commits | Ported (`jerrolds/moonlight-common-c`) |
+| Vendored codec (`app/src/main/jni/pyrowave/`) | Same tree and patches as moonlight-qt's `pyrowave/`, built by `Android.mk` for arm64-v8a and x86_64 |
+| Decoder (`android/pw_decoder.*`) | moonlight-qt's `PyroWaveDecoder`, decoding into Vulkan images on the renderer's device |
+| Renderer (`android/pw_presenter.*`, `pw_swapchain.*`, `pyrowave_renderer.*`) | YCbCr→RGB pass, swapchain on the `ANativeWindow`, render thread, C API |
+| JNI glue, `callbacks.c` routing, Java renderer, codec preference | Not started |
+
+Desktop tests (`android/tests/`, lavapipe or any Vulkan 1.3 GPU):
+
+- `tst_pyrowaveframing`: moonlight-qt's framing parser tests, unchanged.
+- `pw_render_test`: colour conversion, letterboxing, rotation and semaphore
+  ordering of the presenter. `PW_TEST_GPU_DECODE=1` adds a full
+  encode → record framing → decode → render round trip, including a lost
+  payload, but needs a real GPU: Mesa's lavapipe crashes running PyroWave's
+  decode shaders, in upstream's own decode path too.
