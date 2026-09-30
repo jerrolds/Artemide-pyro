@@ -1,3 +1,4 @@
 [submodule "app/src/main/jni/moonlight-core/moonlight-common-c"]
 	path = app/src/main/jni/moonlight-core/moonlight-common-c
-	url = https://github.com/ClassicOldSong/moonlight-common-c
+	url = https://github.com/jerrolds/moonlight-common-c
+	branch = ccr-ea2408c2-mx41mg
