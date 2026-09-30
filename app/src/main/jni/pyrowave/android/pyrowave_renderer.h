@@ -31,6 +31,10 @@ typedef struct _PW_RENDERER_STATS {
     uint32_t noWindowFrames;  // decoded nothing because no window was attached
     uint64_t totalDecodeUs;   // CPU time parsing and submitting decodes
     uint64_t totalPresentUs;  // CPU time acquiring, recording and presenting
+    uint32_t outputWidth;     // swapchain size (0 without a window)
+    uint32_t outputHeight;
+    bool fragmentPath;        // decoder uses PyroWave's mobile (fragment shader) path
+    bool mailbox;             // swapchain presents in mailbox mode (else FIFO)
 } PW_RENDERER_STATS;
 
 // Whether this device can decode and present PyroWave (Vulkan 1.3 and the

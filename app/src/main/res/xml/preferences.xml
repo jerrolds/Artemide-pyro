@@ -28,7 +28,7 @@
         <com.limelight.preferences.SeekBarPreference
             android:dialogMessage="@string/summary_seekbar_bitrate"
             android:key="seekbar_bitrate_kbps"
-            android:max="300000"
+            android:max="1500000"
             android:summary="@string/summary_seekbar_bitrate"
             android:text="@string/suffix_seekbar_bitrate_mbps"
             android:title="@string/title_seekbar_bitrate"

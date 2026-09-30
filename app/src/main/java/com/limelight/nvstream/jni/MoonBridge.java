@@ -22,6 +22,29 @@ public class MoonBridge {
     public static final int VIDEO_FORMAT_MASK_AV1 = 0xF000;
     public static final int VIDEO_FORMAT_MASK_10BIT = 0x2200;
 
+    // PyroWave (intra-only GPU wavelet codec, Vibepollo extension). Only the
+    // 8-bit 4:2:0 profile is requested. See docs/PYROWAVE_DECODE_PATH.md.
+    public static final int VIDEO_FORMAT_PYROWAVE = 0x010000;
+    public static final int VIDEO_FORMAT_MASK_PYROWAVE = 0x0F0000;
+    // ServerCodecModeSupport bit of a host that can stream 8-bit 4:2:0 PyroWave
+    public static final int SCM_PYROWAVE = 0x00800000;
+
+    // Order of the values pyroWaveGetStats() fills in
+    public static final int PYROWAVE_STAT_RECEIVED = 0;
+    public static final int PYROWAVE_STAT_REPLACED = 1;
+    public static final int PYROWAVE_STAT_REJECTED = 2;
+    public static final int PYROWAVE_STAT_PARTIAL = 3;
+    public static final int PYROWAVE_STAT_DECODED = 4;
+    public static final int PYROWAVE_STAT_PRESENTED = 5;
+    public static final int PYROWAVE_STAT_NO_WINDOW = 6;
+    public static final int PYROWAVE_STAT_DECODE_US = 7;
+    public static final int PYROWAVE_STAT_PRESENT_US = 8;
+    public static final int PYROWAVE_STAT_OUTPUT_WIDTH = 9;
+    public static final int PYROWAVE_STAT_OUTPUT_HEIGHT = 10;
+    public static final int PYROWAVE_STAT_FRAGMENT_PATH = 11;
+    public static final int PYROWAVE_STAT_MAILBOX = 12;
+    public static final int PYROWAVE_STAT_COUNT = 13;
+
     public static final int BUFFER_TYPE_PICDATA = 0;
     public static final int BUFFER_TYPE_SPS = 1;
     public static final int BUFFER_TYPE_PPS = 2;
@@ -421,6 +444,23 @@ public class MoonBridge {
     public static native boolean guessControllerHasPaddles(int vendorId, int productId);
 
     public static native boolean guessControllerHasShareButton(int vendorId, int productId);
+
+    // PyroWave renderer (native Vulkan decode and presentation)
+    public static native boolean isPyroWaveAvailable();
+
+    public static native String getPyroWaveStatus();
+
+    public static native int pyroWaveSetup(int videoFormat, int width, int height, int frameRate, boolean fullRange);
+
+    public static native void pyroWaveSetSurface(android.view.Surface surface);
+
+    public static native void pyroWaveStart();
+
+    public static native void pyroWaveStop();
+
+    public static native void pyroWaveCleanup();
+
+    public static native void pyroWaveGetStats(long[] stats);
 
     public static native void init();
 }

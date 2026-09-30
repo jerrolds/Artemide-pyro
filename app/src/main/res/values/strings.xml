@@ -133,6 +133,10 @@
     <string name="perf_overlay_netdrops">Frames dropped by your network connection: %1$.2f%%</string>
     <string name="perf_overlay_netlatency">Average network latency: %1$d ms (variance: %2$d ms)</string>
     <string name="perf_overlay_dectime">Average decoding time: %1$.2f ms</string>
+    <string name="perf_overlay_pyrowave_output">Output: %1$s, %2$s</string>
+    <string name="perf_overlay_pyrowave_frames">Frames dropped: %1$d superseded, %2$d undecodable, %3$d partial</string>
+    <string name="perf_overlay_pyrowave_cputime">CPU time per frame: %1$.2f ms decode, %2$.2f ms present</string>
+    <string name="perf_overlay_pyrowave_lite_drops">drops: %1$d</string>
 
     <!-- Performance Report Sharing -->
     <string name="email_prefix_message">
@@ -350,6 +354,8 @@
     <string name="videoformat_av1always">Prefer AV1 (Experimental)</string>
     <string name="videoformat_hevcalways">Prefer HEVC</string>
     <string name="videoformat_h264always">Prefer H.264</string>
+    <string name="videoformat_pyrowave">PyroWave (Vibepollo, wired LAN)</string>
+    <string name="pyrowave_unavailable">PyroWave is not available on this device: %1$s</string>
 
     <string name="title_frame_pacing">Video frame pacing</string>
     <string name="summary_frame_pacing">Specify how to balance video latency and smoothness</string>

@@ -40,6 +40,7 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
                    moonlight-common-c/enet/win32.c \
                    simplejni.c \
                    callbacks.c \
+                   pyrowave_jni.cpp \
                    minisdl.c \
 
 
@@ -53,7 +54,7 @@ ifeq ($(NDK_DEBUG),1)
 LOCAL_CFLAGS += -DLC_DEBUG
 endif
 
-LOCAL_LDLIBS := -llog
+LOCAL_LDLIBS := -llog -landroid
 
 LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures pyrowave-android
 LOCAL_LDFLAGS += -Wl,--exclude-libs,ALL

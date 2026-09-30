@@ -25,6 +25,7 @@ public class PreferenceConfiguration {
         FORCE_AV1,
         FORCE_HEVC,
         FORCE_H264,
+        FORCE_PYROWAVE,
     };
 
     public enum AnalogStickForScrolling {
@@ -234,6 +235,8 @@ public class PreferenceConfiguration {
     public static final String RES_NATIVE = "Native";
 
     public int width, height, bitrate;
+    // The bitrate was not set by the user (so a PyroWave default may replace it)
+    public boolean bitrateIsDefault;
     public float fps;
 //    public String customBitrate;
     public boolean forceTightThresholds = false; // default off
@@ -571,6 +574,15 @@ public class PreferenceConfiguration {
         return context.getResources().getConfiguration().smallestScreenWidthDp < 500;
     }
 
+    // PyroWave spends a fixed budget per pixel: 1.6 bits per pixel is the codec
+    // author's visually clean point for 4:2:0 (200 Mbps at 1080p60). Capped to
+    // what a gigabit link carries after FEC and audio, as moonlight-qt does.
+    public static int getDefaultPyroWaveBitrate(int width, int height, float fps) {
+        double kbps = (double) width * height * fps * 1.6 / 1000.0;
+        kbps = Math.max(20000.0, Math.min(900000.0, kbps));
+        return (int) kbps / 1000 * 1000;
+    }
+
     public static int getDefaultBitrate(Context context) {
         SharedPreferences prefs = ProfilesManager.getInstance().getOverlayingSharedPreferences(context);
         return getDefaultBitrate(
@@ -593,6 +605,9 @@ public class PreferenceConfiguration {
         }
         else if (str.equals("neverh265")) {
             return FormatOption.FORCE_H264;
+        }
+        else if (str.equals("forcepyrowave")) {
+            return FormatOption.FORCE_PYROWAVE;
         }
         else {
             // Should never get here
@@ -831,6 +846,8 @@ private static int getFramePacingValue(Context context) {
         if (config.bitrate == 0) {
             config.bitrate = getDefaultBitrate(context);
         }
+        // Changing resolution or FPS stores the matching default, so compare
+        config.bitrateIsDefault = config.bitrate == getDefaultBitrate(context);
 
         config.meteredBitrate = prefs.getInt((METERED_BITRATE_PREF_STRING), 0);
         if (config.meteredBitrate == 0) {

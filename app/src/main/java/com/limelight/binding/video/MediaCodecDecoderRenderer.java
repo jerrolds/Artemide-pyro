@@ -200,6 +200,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private boolean foreground = true;
     private PerfOverlayListener perfListener;
 
+    // Set while a PyroWave stream is active; it replaces MediaCodec entirely
+    private PyroWaveRenderer pyroWave;
+    private boolean pyroWaveHasSurface;
+
     private static final int CR_MAX_TRIES = 10;
     private static final int CR_RECOVERY_TYPE_NONE = 0;
     private static final int CR_RECOVERY_TYPE_FLUSH = 1;
@@ -430,6 +434,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     public void setRenderTarget(Surface renderTarget) {
         this.renderTarget = renderTarget;
+
+        // The codec is only known at setup, so give the native PyroWave
+        // renderer the surface up front whenever PyroWave may be negotiated
+        if (prefs.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE &&
+                PyroWaveRenderer.isAvailable()) {
+            MoonBridge.pyroWaveSetSurface(renderTarget);
+            pyroWaveHasSurface = renderTarget != null;
+        }
     }
 
     public MediaCodecDecoderRenderer(Activity activity, PreferenceConfiguration prefs,
@@ -963,6 +975,13 @@ this.initialWidth = invertResolution ? height : width;
         this.initialHeight = invertResolution ? width : height;
         this.videoFormat = format;
         this.refreshRate = redrawRate;
+
+        if ((format & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+            // Decoded and presented natively with Vulkan; no MediaCodec
+            pyroWave = new PyroWaveRenderer(context, prefs, perfListener);
+            return pyroWave.setup(format, width, height, redrawRate,
+                    getPreferredColorRange() == MoonBridge.COLOR_RANGE_FULL);
+        }
 
         return initializeDecoder(false);
     }
@@ -1929,6 +1948,11 @@ if (preferLowerDelays) {
 
     @Override
     public void start() {
+        if (pyroWave != null) {
+            pyroWave.start();
+            return;
+        }
+
         startRendererThread();
         startChoreographerThread();
     }
@@ -1937,6 +1961,12 @@ if (preferLowerDelays) {
     public void prepareForStop() {
         // Let the decoding code know to ignore codec exceptions now
         stopping = true;
+
+        // The surface is going away: the PyroWave renderer must stop using it now
+        if (pyroWaveHasSurface) {
+            MoonBridge.pyroWaveSetSurface(null);
+            pyroWaveHasSurface = false;
+        }
 
         // Halt the rendering thread
         if (rendererThread != null) {
@@ -1969,6 +1999,11 @@ if (preferLowerDelays) {
         // May be called already, but we'll call it now to be safe
         prepareForStop();
 
+        if (pyroWave != null) {
+            pyroWave.stop();
+            return;
+        }
+
         // Wait for the Choreographer looper to shut down (if we have one)
         if (choreographerHandlerThread != null) {
             try {
@@ -1998,11 +2033,22 @@ if (preferLowerDelays) {
 
     @Override
     public void cleanup() {
+        if (pyroWave != null) {
+            pyroWave.cleanup();
+            pyroWave = null;
+            return;
+        }
+
         videoDecoder.release();
     }
 
     @Override
     public void setHdrMode(boolean enabled, byte[] hdrMetadata) {
+        if (pyroWave != null) {
+            // Only 8-bit SDR PyroWave is requested
+            return;
+        }
+
         // HDR metadata is only supported in Android 7.0 and later, so don't bother
         // restarting the codec on anything earlier than that.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
