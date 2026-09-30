@@ -25,6 +25,8 @@ public class StreamConfiguration {
     private int remote;
     private MoonBridge.AudioConfiguration audioConfiguration;
     private int supportedVideoFormats;
+    // Bitrate for the fallback codec when PyroWave is requested with its own bitrate (0 = same)
+    private int nonPyroWaveBitrate;
     private int attachedGamepadMask;
     private int encryptionFlags;
     private int colorRange;
@@ -126,6 +128,11 @@ public class StreamConfiguration {
             return this;
         }
         
+        public StreamConfiguration.Builder setNonPyroWaveBitrate(int bitrate) {
+            config.nonPyroWaveBitrate = bitrate;
+            return this;
+        }
+
         public StreamConfiguration.Builder setSupportedVideoFormats(int supportedVideoFormats) {
             config.supportedVideoFormats = supportedVideoFormats;
             return this;
@@ -231,6 +238,14 @@ public class StreamConfiguration {
         return audioConfiguration;
     }
     
+    // The host cannot stream PyroWave: use the other codecs at their own bitrate
+    void removePyroWave() {
+        supportedVideoFormats &= ~MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE;
+        if (nonPyroWaveBitrate != 0) {
+            bitrate = nonPyroWaveBitrate;
+        }
+    }
+
     public int getSupportedVideoFormats() {
         return supportedVideoFormats;
     }

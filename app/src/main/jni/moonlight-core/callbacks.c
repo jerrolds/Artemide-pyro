@@ -10,6 +10,8 @@
 
 #include <cpu-features.h>
 
+#include "pyrowave_renderer.h"
+
 static OpusMSDecoder* Decoder;
 static OPUS_MULTISTREAM_CONFIGURATION OpusConfig;
 
@@ -39,6 +41,8 @@ static jmethodID BridgeClRumbleTriggersMethod;
 static jmethodID BridgeClSetMotionEventStateMethod;
 static jmethodID BridgeClSetControllerLEDMethod;
 static jbyteArray DecodedFrameBuffer;
+// PyroWave frames go to the native renderer; see pyrowave_renderer.h
+static bool PyroWaveActive;
 static jshortArray DecodedAudioBuffer;
 
 void DetachThread(void* context) {
@@ -120,6 +124,9 @@ int BridgeDrSetup(int videoFormat, int width, int height, int redrawRate, void* 
     // Use a 32K frame buffer that will increase if needed
     DecodedFrameBuffer = (*env)->NewGlobalRef(env, (*env)->NewByteArray(env, 32768));
 
+    // The Java renderer set up the native PyroWave renderer for this format
+    PyroWaveActive = (videoFormat & VIDEO_FORMAT_MASK_PYROWAVE) != 0;
+
     return 0;
 }
 
@@ -141,9 +148,16 @@ void BridgeDrCleanup(void) {
     (*env)->DeleteGlobalRef(env, DecodedFrameBuffer);
 
     (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeDrCleanupMethod);
+    PyroWaveActive = false;
 }
 
 int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
+    // PyroWave frames never enter Java: the renderer needs each packet's
+    // lost/record-start flags, which the byte array below would discard
+    if (PyroWaveActive) {
+        return PwRendererSubmitDecodeUnit(decodeUnit);
+    }
+
     JNIEnv* env = GetThreadEnv();
     int ret;
 

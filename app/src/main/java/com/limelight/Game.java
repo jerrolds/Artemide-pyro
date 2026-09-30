@@ -28,6 +28,7 @@ import com.limelight.binding.video.CrashListener;
 import com.limelight.binding.video.MediaCodecDecoderRenderer;
 import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.binding.video.PerfOverlayListener;
+import com.limelight.binding.video.PyroWaveRenderer;
 import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.NvConnectionListener;
 import com.limelight.nvstream.StreamConfiguration;
@@ -843,6 +844,26 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             }
         }
 
+        // PyroWave is only used when chosen explicitly: it needs a wired link with
+        // hundreds of Mbps to spare. The other formats stay as the fallback for
+        // hosts without it; the host picks PyroWave whenever it supports it.
+        int streamBitrate = isMetered ? prefConfig.meteredBitrate : prefConfig.bitrate;
+        int nonPyroWaveBitrate = 0;
+        if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE) {
+            if (PyroWaveRenderer.isAvailable()) {
+                supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE;
+                if (prefConfig.bitrateIsDefault) {
+                    nonPyroWaveBitrate = streamBitrate;
+                    streamBitrate = PreferenceConfiguration.getDefaultPyroWaveBitrate(
+                            prefConfig.width, prefConfig.height, prefConfig.fps);
+                }
+            }
+            else {
+                Toast.makeText(this, getString(R.string.pyrowave_unavailable, MoonBridge.getPyroWaveStatus()),
+                        Toast.LENGTH_LONG).show();
+            }
+        }
+
         int gamepadMask = ControllerHandler.getAttachedControllerMask(this);
         if (!prefConfig.multiController) {
             // Always set gamepad 1 present for when multi-controller is
@@ -905,7 +926,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 .setResolutionScaleFactor(resolutionScaleFactor)
                 .setApp(app)
                 .setEnableUltraLowLatency(prefConfig.enableUltraLowLatency)
-                .setBitrate(isMetered ? prefConfig.meteredBitrate: prefConfig.bitrate)
+                .setBitrate(streamBitrate)
+                .setNonPyroWaveBitrate(nonPyroWaveBitrate)
                 .setEnableSops(prefConfig.enableSops)
                 .enableLocalAudioPlayback(prefConfig.playHostAudio)
                 .setMaxPacketSize(1392)
@@ -2001,6 +2023,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 selectedVideoFormat += "HEVC";
             } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_AV1) != 0) {
                 selectedVideoFormat += "AV1";
+            } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+                selectedVideoFormat += "PyroWave";
             }
             else {
                 selectedVideoFormat += "UNKNOWN";

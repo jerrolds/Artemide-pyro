@@ -185,7 +185,8 @@ For the first frame: 8-bit 4:2:0 SDR at 1920×1080, complete frames only
 | Vendored codec (`app/src/main/jni/pyrowave/`) | Same tree and patches as moonlight-qt's `pyrowave/`, built by `Android.mk` for arm64-v8a and x86_64 |
 | Decoder (`android/pw_decoder.*`) | moonlight-qt's `PyroWaveDecoder`, decoding into Vulkan images on the renderer's device |
 | Renderer (`android/pw_presenter.*`, `pw_swapchain.*`, `pyrowave_renderer.*`) | YCbCr→RGB pass, swapchain on the `ANativeWindow`, render thread, C API |
-| JNI glue, `callbacks.c` routing, Java renderer, codec preference | Not started |
+| JNI glue (`moonlight-core/pyrowave_jni.cpp`), `callbacks.c` routing | PyroWave decode units go straight to the native renderer |
+| Java (`PyroWaveRenderer`, `MediaCodecDecoderRenderer`, `Game`, `NvConnection`) | "PyroWave" video format setting; advertised only when chosen, the device passes `PwIsAvailable` and the host sets `SCM_PYROWAVE`; performance overlay; default bitrate 1.6 bits/pixel when the bitrate slider is at its default |
 
 Desktop tests (`android/tests/`, lavapipe or any Vulkan 1.3 GPU):
 

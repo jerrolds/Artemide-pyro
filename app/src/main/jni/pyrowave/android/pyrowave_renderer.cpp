@@ -63,6 +63,7 @@ private:
     void process(const Frame& frame);
     bool present(int surface, uint64_t decodeValue, int colorspace);
     void waitIdle();
+    void publishOutput();
 
     PwVulkan m_Vulkan;
     PwDecoder m_Decoder;
@@ -98,6 +99,8 @@ private:
     std::atomic<uint32_t> m_Received { 0 }, m_Replaced { 0 }, m_Rejected { 0 }, m_Partial { 0 };
     std::atomic<uint32_t> m_Decoded { 0 }, m_Presented { 0 }, m_NoWindow { 0 };
     std::atomic<uint64_t> m_DecodeUs { 0 }, m_PresentUs { 0 };
+    std::atomic<uint32_t> m_OutputWidth { 0 }, m_OutputHeight { 0 };
+    std::atomic<bool> m_Mailbox { false };
     uint64_t m_LastErrorLogUs = 0;
 };
 
@@ -122,6 +125,13 @@ Renderer::~Renderer()
         vkDestroyCommandPool(device, m_CommandPool, nullptr);
     }
     // m_Presenter, m_Decoder and then m_Vulkan are destroyed in reverse order
+}
+
+void Renderer::publishOutput()
+{
+    m_OutputWidth = m_Swapchain.valid() ? m_Swapchain.extent().width : 0;
+    m_OutputHeight = m_Swapchain.valid() ? m_Swapchain.extent().height : 0;
+    m_Mailbox = m_Swapchain.valid() && m_Swapchain.presentMode() == VK_PRESENT_MODE_MAILBOX_KHR;
 }
 
 void Renderer::waitIdle()
@@ -198,6 +208,7 @@ void Renderer::setWindow(ANativeWindow* window)
     waitIdle();
     m_Swapchain.destroy();
     m_NeedRecreate = false;
+    publishOutput();
     if (window == nullptr) {
         return;
     }
@@ -209,6 +220,7 @@ void Renderer::setWindow(ANativeWindow* window)
         m_Swapchain.destroy();
         return;
     }
+    publishOutput();
     pwLog(ANDROID_LOG_INFO, "Presenting %ux%u, %s, rotation %d",
           m_Swapchain.extent().width, m_Swapchain.extent().height,
           m_Swapchain.presentMode() == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "FIFO",
@@ -344,9 +356,11 @@ bool Renderer::present(int surface, uint64_t decodeValue, int colorspace)
         if (!m_Swapchain.recreate(error) || !m_Presenter.setTargetFormat(m_Swapchain.format(), error)) {
             pwLog(ANDROID_LOG_ERROR, "Recreating the swapchain failed: %s", error.c_str());
             m_Swapchain.destroy();
+            publishOutput();
             return false;
         }
         m_NeedRecreate = false;
+        publishOutput();
     }
 
     // Reuse this slot's command buffer and acquire semaphore only once the
@@ -460,6 +474,10 @@ void Renderer::stats(PW_RENDERER_STATS* out) const
     out->noWindowFrames = m_NoWindow;
     out->totalDecodeUs = m_DecodeUs;
     out->totalPresentUs = m_PresentUs;
+    out->outputWidth = m_OutputWidth;
+    out->outputHeight = m_OutputHeight;
+    out->fragmentPath = m_Decoder.fragmentPath();
+    out->mailbox = m_Mailbox;
 }
 
 // Serializes the API entry points; the renderer exists between setup and cleanup

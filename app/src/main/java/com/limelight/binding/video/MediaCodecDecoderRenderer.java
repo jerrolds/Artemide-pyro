@@ -247,6 +247,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private PerfOverlayListener perfListener;
     private final PerfOverlayComposer perfOverlayComposer = new PerfOverlayComposer();
 
+    // Set while a PyroWave stream is active; it replaces MediaCodec entirely
+    private PyroWaveRenderer pyroWave;
+    private boolean pyroWaveHasSurface;
+
     // Fetchinputbuffer utils:
     private long inputDequeueHangStartMs = 0L;
     private int inputTryAgainStreak = 0;
@@ -613,6 +617,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
 
         this.renderTarget = renderTarget;
+
+        // The codec is only known at setup, so give the native PyroWave
+        // renderer the surface up front whenever PyroWave may be negotiated
+        if (prefs.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE &&
+                PyroWaveRenderer.isAvailable()) {
+            MoonBridge.pyroWaveSetSurface(renderTarget);
+            pyroWaveHasSurface = renderTarget != null;
+        }
 
         // Re-apply presentation hint to upscaler when render target may change
         if (glUpscaler != null) {
@@ -1152,6 +1164,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         this.coldCfg.initialHeight = coldCfg.invertResolution ? width : height;
         this.videoFormat = format;
         this.refreshRate = redrawRate;
+
+        if ((format & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+            // Decoded and presented natively with Vulkan; no MediaCodec
+            pyroWave = new PyroWaveRenderer(context, prefs, perfListener);
+            return pyroWave.setup(format, width, height, redrawRate,
+                    getPreferredColorRange() == MoonBridge.COLOR_RANGE_FULL);
+        }
+
         this.refreshRateHz = queryDisplayRefreshRateHz();
         if (this.refreshRateHz <= 1f) {
             this.refreshRateHz = (float) redrawRate;
@@ -2086,7 +2106,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     @Override
     public void start() {
-
+        if (pyroWave != null) {
+            pyroWave.start();
+            return;
+        }
 
         // Start CPU warm-up if enabled (lazy init; avoids overhead/log spam when disabled)
         if (prefs != null && prefs.cpuWarmUpEnable && !cpuWarmUpStarted) {
@@ -2114,6 +2137,15 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     public void prepareForStop() {
         // Let the decoding code know to ignore codec exceptions now
         stopping = true;
+
+        // The surface is going away: the PyroWave renderer must stop using it now
+        if (pyroWaveHasSurface) {
+            MoonBridge.pyroWaveSetSurface(null);
+            pyroWaveHasSurface = false;
+        }
+        if (pyroWave != null) {
+            return;
+        }
 
         // Stop async callbacks first to avoid new buffers arriving while tearing down
         try { detachAsyncCodec(); } catch (Throwable ignored) {}
@@ -2431,6 +2463,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     public void stop() {
         // May be called already, but we'll call it now to be safe
         prepareForStop();
+
+        if (pyroWave != null) {
+            pyroWave.stop();
+            return;
+        }
+
         // Final CpuWarmUp stop check
         if (cpuWarmUp != null && cpuWarmUpStarted) {
             try {
@@ -2514,6 +2552,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     @Override
     public void cleanup() {
+        if (pyroWave != null) {
+            pyroWave.cleanup();
+            pyroWave = null;
+            return;
+        }
 
         // Clear decode latency tracking to prevent memory leaks
         decodeLatencyTracker.clear();
@@ -2558,6 +2601,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     @Override
     public void setHdrMode(boolean enabled, byte[] hdrMetadata) {
+        if (pyroWave != null) {
+            // PyroWave follows each frame's own HDR flag and reads the mastering
+            // metadata from the connection when it builds an HDR swapchain
+            return;
+        }
+
         // HDR metadata is only supported in Android 7.0 and later, so don't bother
         // restarting the codec on anything earlier than that.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
