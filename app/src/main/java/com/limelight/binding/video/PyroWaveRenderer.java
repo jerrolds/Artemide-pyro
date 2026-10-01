@@ -1,11 +1,14 @@
 package com.limelight.binding.video;
 
 import android.content.Context;
+import android.net.TrafficStats;
+import android.os.Process;
 
 import com.limelight.LimeLog;
 import com.limelight.R;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
+import com.limelight.utils.TrafficStatsHelper;
 
 import java.util.Locale;
 
@@ -20,6 +23,8 @@ public class PyroWaveRenderer {
     private final Context context;
     private final PreferenceConfiguration prefs;
     private final PerfOverlayListener perfListener;
+    // Previous-window state for the overlay, only touched by the stats thread
+    private long lastHostLatencySum, lastHostLatencyCount, lastNetBytes;
 
     private int width;
     private int height;
@@ -47,11 +52,10 @@ public class PyroWaveRenderer {
 
     public void start() {
         MoonBridge.pyroWaveStart();
-        if (prefs.enablePerfOverlay || prefs.enablePerfLogging) {
-            statsRunning = true;
-            statsThread = new Thread(this::statsLoop, "PyroWave stats");
-            statsThread.start();
-        }
+        // Always run: the overlay can be toggled mid-stream, and the loop checks the flag each tick
+        statsRunning = true;
+        statsThread = new Thread(this::statsLoop, "PyroWave stats");
+        statsThread.start();
     }
 
     public void stop() {
@@ -121,11 +125,32 @@ public class PyroWaveRenderer {
         String path = cur[MoonBridge.PYROWAVE_STAT_FRAGMENT_PATH] != 0 ? "fragment" : "compute";
         String mode = cur[MoonBridge.PYROWAVE_STAT_MAILBOX] != 0 ? "mailbox" : "FIFO";
 
+        // Bandwidth is app traffic (video + audio + control) over the window
+        String bandwidth = null;
+        if (TrafficStatsHelper.getPackageRxBytes(Process.myUid()) != TrafficStats.UNSUPPORTED) {
+            long netBytes = TrafficStatsHelper.getPackageRxBytes(Process.myUid()) + TrafficStatsHelper.getPackageTxBytes(Process.myUid());
+            if (lastNetBytes != 0) {
+                double mbps = (netBytes - lastNetBytes) * 8 / seconds / 1e6;
+                bandwidth = String.format(Locale.ROOT, "%.1f Mbps", mbps);
+            }
+            lastNetBytes = netBytes;
+        }
+
+        long[] host = new long[4];
+        MoonBridge.pyroWaveGetHostLatency(host);
+        long hostFrames = host[1] - lastHostLatencyCount;
+        float hostAvg = hostFrames > 0 ? (float) (host[0] - lastHostLatencySum) / hostFrames : 0;
+        lastHostLatencySum = host[0];
+        lastHostLatencyCount = host[1];
+
         StringBuilder sb = new StringBuilder();
         if (prefs.enablePerfOverlayLite) {
             sb.append("PyroWave\t FPS: ").append(context.getString(R.string.perf_overlay_lite_fps, presentedFps));
             sb.append("\t ").append(context.getString(R.string.perf_overlay_lite_net, (int) (rttInfo >> 32)));
             sb.append("\t ").append(context.getString(R.string.perf_overlay_pyrowave_lite_drops, replaced + rejected));
+            if (bandwidth != null) {
+                sb.append("\t ").append(context.getString(R.string.perf_overlay_lite_bandwidth)).append(": ").append(bandwidth);
+            }
         }
         else {
             sb.append(context.getString(R.string.perf_overlay_streamdetails, width + "x" + height, presentedFps)).append('\n');
@@ -135,7 +160,14 @@ public class PyroWaveRenderer {
             sb.append(context.getString(R.string.perf_overlay_incomingfps, receivedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_renderingfps, presentedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_pyrowave_frames, replaced, rejected, partial)).append('\n');
+            if (bandwidth != null) {
+                sb.append(context.getString(R.string.perf_overlay_lite_bandwidth)).append(": ").append(bandwidth).append('\n');
+            }
             sb.append(context.getString(R.string.perf_overlay_netlatency, (int) (rttInfo >> 32), (int) rttInfo)).append('\n');
+            if (hostFrames > 0 && host[2] != 0xFFFFFFFFL) {
+                sb.append(context.getString(R.string.perf_overlay_hostprocessinglatency,
+                        host[2] / 10f, host[3] / 10f, hostAvg / 10f)).append('\n');
+            }
             sb.append(context.getString(R.string.perf_overlay_pyrowave_cputime, decodeMs, presentMs));
         }
 
