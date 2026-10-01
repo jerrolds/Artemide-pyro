@@ -8,10 +8,16 @@
 #include <android/log.h>
 #include <android/native_window.h>
 
+#include <dlfcn.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -34,10 +40,167 @@ uint64_t nowUs()
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// Android's performance hint API. Decoding runs on the GPU, and the system's GPU
+// governor can leave the clock low under a high load: at 120 fps the stream slid
+// to 75 fps with the GPU at 220 MHz while it was 85% busy. Telling the system our
+// frame deadline, and how long each frame really took, lets it raise the clocks.
+// The entry points are resolved at run time: the NDK this builds against predates
+// the newest ones, and older devices lack them all.
+struct APerformanceHintManager;
+struct APerformanceHintSession;
+struct AWorkDuration;
+struct ASessionCreationConfig;
+
+class PerfHint {
+public:
+    // Must be called on the thread whose frames are reported
+    void start(int64_t targetNs)
+    {
+        if (m_Session != nullptr) {
+            return;
+        }
+        void* lib = dlopen("libandroid.so", RTLD_NOW);
+        if (lib == nullptr) {
+            return;
+        }
+
+        auto getManager = fn<APerformanceHintManager* (*)()>(lib, "APerformanceHint_getManager");
+        APerformanceHintManager* manager = getManager != nullptr ? getManager() : nullptr;
+        if (manager == nullptr) {
+            pwLog(ANDROID_LOG_INFO, "Performance hints: not available on this device");
+            return;
+        }
+
+        m_Close = fn<void (*)(APerformanceHintSession*)>(lib, "APerformanceHint_closeSession");
+        m_Report = fn<int (*)(APerformanceHintSession*, int64_t)>(lib, "APerformanceHint_reportActualWorkDuration");
+        m_Report2 = fn<int (*)(APerformanceHintSession*, AWorkDuration*)>(lib, "APerformanceHint_reportActualWorkDuration2");
+        m_DurCreate = fn<AWorkDuration* (*)()>(lib, "AWorkDuration_create");
+        m_DurRelease = fn<void (*)(AWorkDuration*)>(lib, "AWorkDuration_release");
+        m_DurStart = fn<void (*)(AWorkDuration*, int64_t)>(lib, "AWorkDuration_setWorkPeriodStartTimestampNanos");
+        m_DurTotal = fn<void (*)(AWorkDuration*, int64_t)>(lib, "AWorkDuration_setActualTotalDurationNanos");
+        m_DurCpu = fn<void (*)(AWorkDuration*, int64_t)>(lib, "AWorkDuration_setActualCpuDurationNanos");
+        m_DurGpu = fn<void (*)(AWorkDuration*, int64_t)>(lib, "AWorkDuration_setActualGpuDurationNanos");
+        m_Notify = fn<int (*)(APerformanceHintSession*, bool, bool, const char*)>(lib, "APerformanceHint_notifyWorkloadIncrease");
+
+        const pid_t tid = pid_t(syscall(SYS_gettid));
+
+        // Android 16: a graphics pipeline session is what the system uses to drive the GPU clock
+        auto cfgCreate = fn<ASessionCreationConfig* (*)()>(lib, "ASessionCreationConfig_create");
+        auto cfgRelease = fn<void (*)(ASessionCreationConfig*)>(lib, "ASessionCreationConfig_release");
+        auto cfgTids = fn<void (*)(ASessionCreationConfig*, const pid_t*, size_t)>(lib, "ASessionCreationConfig_setTids");
+        auto cfgTarget = fn<void (*)(ASessionCreationConfig*, int64_t)>(lib, "ASessionCreationConfig_setTargetWorkDurationNanos");
+        auto cfgGraphics = fn<void (*)(ASessionCreationConfig*, bool)>(lib, "ASessionCreationConfig_setGraphicsPipeline");
+        auto createUsingConfig = fn<int (*)(APerformanceHintManager*, ASessionCreationConfig*, APerformanceHintSession**)>(
+            lib, "APerformanceHint_createSessionUsingConfig");
+
+        const char* kind = "plain";
+        if (cfgCreate && cfgRelease && cfgTids && cfgTarget && cfgGraphics && createUsingConfig) {
+            ASessionCreationConfig* config = cfgCreate();
+            cfgTids(config, &tid, 1);
+            cfgTarget(config, targetNs);
+            cfgGraphics(config, true);
+            APerformanceHintSession* session = nullptr;
+            if (createUsingConfig(manager, config, &session) == 0 && session != nullptr) {
+                m_Session = session;
+                kind = "graphics pipeline";
+            }
+            cfgRelease(config);
+        }
+        if (m_Session == nullptr) {
+            auto create = fn<APerformanceHintSession* (*)(APerformanceHintManager*, const int32_t*, size_t, int64_t)>(
+                lib, "APerformanceHint_createSession");
+            const int32_t id = tid;
+            if (create != nullptr) {
+                m_Session = create(manager, &id, 1, targetNs);
+            }
+        }
+        if (m_Session == nullptr) {
+            pwLog(ANDROID_LOG_INFO, "Performance hints: could not create a session");
+            return;
+        }
+
+        m_TargetNs = targetNs;
+        if (m_Notify != nullptr) {
+            m_Notify(m_Session, true, true, "pyrowave");
+        }
+        pwLog(ANDROID_LOG_INFO, "Performance hints: %s session, target %.2f ms, CPU/GPU timing %s",
+              kind, double(targetNs) / 1e6, m_Report2 != nullptr ? "reported" : "total only");
+    }
+
+    // Times are nanoseconds on CLOCK_MONOTONIC (std::chrono::steady_clock on Android)
+    void report(int64_t startNs, int64_t totalNs, int64_t cpuNs, int64_t gpuNs)
+    {
+        if (m_Session == nullptr || totalNs <= 0) {
+            return;
+        }
+        if (m_Report2 && m_DurCreate && m_DurStart && m_DurTotal && m_DurCpu && m_DurGpu) {
+            if (m_Duration == nullptr) {
+                m_Duration = m_DurCreate();
+            }
+            m_DurStart(m_Duration, startNs);
+            m_DurTotal(m_Duration, totalNs);
+            m_DurCpu(m_Duration, cpuNs);
+            m_DurGpu(m_Duration, gpuNs);
+            m_Report2(m_Session, m_Duration);
+        }
+        else if (m_Report) {
+            m_Report(m_Session, totalNs);
+        }
+
+        // The governor can settle one step short of what the load needs. While frames keep
+        // missing the deadline, say so again, at most twice a second.
+        if (totalNs > m_TargetNs) {
+            if (++m_Over >= 10 && m_Notify != nullptr && startNs - m_LastNotifyNs >= 500000000LL) {
+                m_Notify(m_Session, true, true, "pyrowave");
+                m_LastNotifyNs = startNs;
+            }
+        }
+        else {
+            m_Over = 0;
+        }
+    }
+
+    void stop()
+    {
+        if (m_Duration != nullptr && m_DurRelease != nullptr) {
+            m_DurRelease(m_Duration);
+        }
+        m_Duration = nullptr;
+        if (m_Session != nullptr && m_Close != nullptr) {
+            m_Close(m_Session);
+        }
+        m_Session = nullptr;
+    }
+
+private:
+    template <typename F>
+    static F fn(void* lib, const char* name)
+    {
+        return reinterpret_cast<F>(dlsym(lib, name));
+    }
+
+    APerformanceHintSession* m_Session = nullptr;
+    AWorkDuration* m_Duration = nullptr;
+    int64_t m_TargetNs = 0;
+    int64_t m_LastNotifyNs = 0;
+    int m_Over = 0;
+    void (*m_Close)(APerformanceHintSession*) = nullptr;
+    int (*m_Report)(APerformanceHintSession*, int64_t) = nullptr;
+    int (*m_Report2)(APerformanceHintSession*, AWorkDuration*) = nullptr;
+    int (*m_Notify)(APerformanceHintSession*, bool, bool, const char*) = nullptr;
+    AWorkDuration* (*m_DurCreate)() = nullptr;
+    void (*m_DurRelease)(AWorkDuration*) = nullptr;
+    void (*m_DurStart)(AWorkDuration*, int64_t) = nullptr;
+    void (*m_DurTotal)(AWorkDuration*, int64_t) = nullptr;
+    void (*m_DurCpu)(AWorkDuration*, int64_t) = nullptr;
+    void (*m_DurGpu)(AWorkDuration*, int64_t) = nullptr;
+};
+
 // Enough for the decode of one frame to overlap the render of the previous
-// one while a third waits for the display.
-constexpr int k_SurfaceCount = 3;
-constexpr int k_FramesInFlight = 2;
+// one while a third waits for the display. A deeper queue keeps the GPU busy
+// across the CPU's per-frame work, so mobile clock governors see a full load.
+constexpr int k_SurfaceCount = 4;
+constexpr int k_FramesInFlight = 3;
 
 struct Frame {
     std::vector<uint8_t> data;
@@ -92,6 +255,7 @@ private:
     bool m_PendingValid = false;
     bool m_Stopping = false;
     std::thread m_Thread;
+    PerfHint m_PerfHint; // only touched by the render thread
 
     // Held while the render thread uses the swapchain, and while it is replaced
     std::mutex m_RenderLock;
@@ -292,11 +456,15 @@ int Renderer::submit(PDECODE_UNIT du)
 
 void Renderer::renderLoop()
 {
+    // The deadline is a little tighter than one frame at the tablet's 120 Hz (8.33 ms),
+    // so a frame that only just fits still asks the system for a faster GPU clock
+    m_PerfHint.start(7500000);
     for (;;) {
         {
             std::unique_lock<std::mutex> lock(m_FrameLock);
             m_FrameReady.wait(lock, [this]() { return m_Stopping || m_PendingValid; });
             if (m_Stopping) {
+                m_PerfHint.stop();
                 return;
             }
             std::swap(m_Pending, m_Working);
@@ -343,7 +511,12 @@ void Renderer::process(const Frame& frame)
     if (present(surface, decodeValue, frame.colorspace)) {
         m_Presented++;
     }
-    m_PresentUs += nowUs() - decoded;
+    const uint64_t end = nowUs();
+    m_PresentUs += end - decoded;
+
+    // Present mostly waits for the GPU to finish earlier frames, so it stands in for GPU time
+    m_PerfHint.report(int64_t(start) * 1000, int64_t(end - start) * 1000,
+                      int64_t(decoded - start) * 1000, int64_t(end - decoded) * 1000);
 }
 
 bool Renderer::present(int surface, uint64_t decodeValue, int colorspace)
