@@ -57,6 +57,13 @@ typedef struct _PW_RENDERER_STATS {
     uint64_t gpuDecodeUs;     // GPU time of the decode, summed over the timed frames
     uint64_t gpuConvertUs;    // GPU time of the colour conversion and draw
     uint64_t gpuSamples;      // number of timed frames
+
+    // Latency from the frame being assembled by moonlight-common-c to the GPU finishing it
+    uint64_t assemblySumMs;   // first to last packet of each frame, summed over receivedFrames
+    bool clientTiming;        // the GPU clock can be placed on CLOCK_MONOTONIC
+    uint64_t clientSumUs;     // assembled -> GPU done, summed over clientSamples
+    uint64_t clientSamples;
+    uint32_t clientMaxUs;     // the largest since the previous call
 } PW_RENDERER_STATS;
 
 // Whether this device can decode and present PyroWave (Vulkan 1.3 and the

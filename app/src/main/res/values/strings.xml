@@ -149,6 +149,10 @@
     <string name="perf_overlay_pyrowave_gputime">GPU time: %1$.2f ms decode + %2$.2f ms colour conversion (%3$d timed frames)</string>
     <string name="perf_overlay_pyrowave_gputime_waiting">GPU time: waiting for the first timed frame</string>
     <string name="perf_overlay_pyrowave_gputime_unavailable">GPU time: not available on this device</string>
+    <string name="perf_overlay_pyrowave_client">Client latency (frame assembled to GPU done): %1$.1f ms average, %2$.1f ms worst</string>
+    <string name="perf_overlay_pyrowave_e2e">End-to-end, host to screen (estimated): %1$.1f ms = host %2$.1f + network %3$.1f + receive %4$.1f + client %5$.1f + display %6$.1f</string>
+    <string name="perf_overlay_pyrowave_e2e_waiting">End-to-end: waiting for the first timed frame</string>
+    <string name="perf_overlay_pyrowave_e2e_unavailable">End-to-end: not available (this device cannot place GPU timestamps on the system clock)</string>
 
     <!-- Performance Report Sharing -->
     <string name="email_prefix_message">

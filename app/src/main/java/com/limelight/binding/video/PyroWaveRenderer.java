@@ -3,6 +3,8 @@ package com.limelight.binding.video;
 import android.content.Context;
 import android.net.TrafficStats;
 import android.os.Process;
+import android.view.Display;
+import android.view.WindowManager;
 
 import com.limelight.LimeLog;
 import com.limelight.R;
@@ -32,6 +34,8 @@ public class PyroWaveRenderer {
     private boolean tenBit;
     private boolean chroma444;
     private boolean fullRange;
+    // One refresh period of the display: the estimate for the last step to the screen
+    private float displayPeriodMs = 1000f / 60f;
 
     private Thread statsThread;
     private volatile boolean statsRunning;
@@ -52,6 +56,15 @@ public class PyroWaveRenderer {
         this.tenBit = (videoFormat & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0;
         this.chroma444 = (videoFormat & (MoonBridge.VIDEO_FORMAT_PYROWAVE_444 | MoonBridge.VIDEO_FORMAT_PYROWAVE_HDR10_444)) != 0;
         this.fullRange = fullRange;
+        try {
+            WindowManager windowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+            Display display = windowManager != null ? windowManager.getDefaultDisplay() : null;
+            if (display != null && display.getRefreshRate() > 1f) {
+                displayPeriodMs = 1000f / display.getRefreshRate();
+            }
+        } catch (RuntimeException e) {
+            // Keep the default
+        }
         LimeLog.info("PyroWave: " + width + "x" + height + "@" + frameRate +
                 (fullRange ? " full range" : " limited range") + (tenBit ? ", 10-bit HDR10" : ", 8-bit") +
                 ", " + MoonBridge.getPyroWaveStatus());
@@ -182,6 +195,23 @@ public class PyroWaveRenderer {
                 (cur[MoonBridge.PYROWAVE_STAT_GPU_CONVERT_US] - prev[MoonBridge.PYROWAVE_STAT_GPU_CONVERT_US]) / 1000f / gpuSamples : 0;
         boolean gpuTiming = cur[MoonBridge.PYROWAVE_STAT_GPU_TIMING] != 0;
 
+        // Host to screen. Measured: the host's own processing time, how long the frame took to
+        // arrive, and assembled -> GPU done (the GPU clock is placed on the library's clock).
+        // Estimated: the one-way network trip as half the round trip, and the last step to the
+        // panel as one refresh period (wait for the next refresh plus scan-out). Not covered:
+        // anything before the host captures the frame, and input latency.
+        float assemblyMs = received > 0 ?
+                (float) (cur[MoonBridge.PYROWAVE_STAT_ASSEMBLY_SUM_MS] - prev[MoonBridge.PYROWAVE_STAT_ASSEMBLY_SUM_MS]) / received : 0;
+        boolean clientTiming = cur[MoonBridge.PYROWAVE_STAT_CLIENT_TIMING] != 0;
+        long clientSamples = cur[MoonBridge.PYROWAVE_STAT_CLIENT_SAMPLES] - prev[MoonBridge.PYROWAVE_STAT_CLIENT_SAMPLES];
+        float clientAvgMs = clientSamples > 0 ?
+                (cur[MoonBridge.PYROWAVE_STAT_CLIENT_SUM_US] - prev[MoonBridge.PYROWAVE_STAT_CLIENT_SUM_US]) / 1000f / clientSamples : 0;
+        float clientMaxMs = cur[MoonBridge.PYROWAVE_STAT_CLIENT_MAX_US] / 1000f;
+        float hostMs = hostFrames > 0 ? hostAvg / 10f : 0;
+        float networkMs = (rttInfo >> 32) / 2f;
+        float displayMs = displayPeriodMs;
+        float endToEndMs = hostMs + networkMs + assemblyMs + clientAvgMs + displayMs;
+
         boolean hdrOutput = cur[MoonBridge.PYROWAVE_STAT_HDR] != 0;
         String format = (tenBit ? "10-bit" : "8-bit") + (chroma444 ? " 4:4:4" : " 4:2:0") +
                 (fullRange ? ", full range" : ", limited range") + ", " +
@@ -239,6 +269,18 @@ public class PyroWaveRenderer {
             else {
                 sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime_unavailable));
             }
+            sb.append('\n');
+            if (clientTiming && clientSamples > 0) {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_client, clientAvgMs, clientMaxMs)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e,
+                        endToEndMs, hostMs, networkMs, assemblyMs, clientAvgMs, displayMs));
+            }
+            else if (clientTiming) {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e_waiting));
+            }
+            else {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e_unavailable));
+            }
         }
 
         if (prefs.enablePerfLogging) {
@@ -252,12 +294,16 @@ public class PyroWaveRenderer {
                     "PyroWave detail: %s; GPU %.2f ms decode + %.2f ms convert (%d timed); " +
                             "arrival %.2f ms avg, %.2f ms jitter, %.1f ms worst gap; %.0f KB/frame, %.1f Mbps video, " +
                             "%.2f bits/pixel; packets %d, lost %d (%.2f%%); slowest frame %.1f ms; " +
-                            "%d in flight, %d surfaces, %d swapchain images (%s), hint %s",
+                            "%d in flight, %d surfaces, %d swapchain images (%s), hint %s; " +
+                            "client %.2f ms avg, %.2f ms worst (%d timed); end-to-end %.1f ms = " +
+                            "host %.1f + network %.1f + receive %.1f + client %.1f + display %.1f",
                     format, gpuDecodeMs, gpuConvertMs, gpuSamples, gapAvgMs, jitterMs, worstGapMs,
                     kbPerFrame, videoMbps, bitsPerPixel, packets, lostPackets, lossPercent, worstFrameMs,
                     cur[MoonBridge.PYROWAVE_STAT_FRAMES_IN_FLIGHT], cur[MoonBridge.PYROWAVE_STAT_SURFACES],
                     cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_IMAGES],
-                    swapchainFormatName(cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_FORMAT]), hint));
+                    swapchainFormatName(cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_FORMAT]), hint,
+                    clientAvgMs, clientMaxMs, clientSamples,
+                    endToEndMs, hostMs, networkMs, assemblyMs, clientAvgMs, displayMs));
         }
         return sb.toString();
     }

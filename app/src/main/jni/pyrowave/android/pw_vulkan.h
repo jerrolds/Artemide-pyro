@@ -40,6 +40,13 @@ public:
     // Nanoseconds per timestamp tick
     float timestampPeriodNs() const { return m_Properties.properties.limits.timestampPeriod; }
 
+    // VK_KHR/EXT_calibrated_timestamps: GPU timestamps can be placed on CLOCK_MONOTONIC,
+    // the clock moonlight-common-c stamps frames with (see calibrate())
+    bool hasCalibratedTimestamps() const { return m_Calibrated != 0; }
+    // Reads the GPU timestamp counter and CLOCK_MONOTONIC (in ns) at nearly the same
+    // instant. False if the device cannot do it.
+    bool calibrate(uint64_t& deviceTicks, uint64_t& monotonicNs) const;
+
     const VkInstanceCreateInfo* instanceCreateInfo() const { return &m_InstanceInfo; }
     const VkDeviceCreateInfo* deviceCreateInfo() const { return &m_DeviceInfo; }
 
@@ -58,6 +65,7 @@ private:
     bool m_HasHdrColorSpace = false;
     bool m_HasHdrMetadata = false;
     uint32_t m_TimestampValidBits = 0;
+    int m_Calibrated = 0; // 0: unavailable, 1: VK_KHR_calibrated_timestamps, 2: the EXT one
 
     VkApplicationInfo m_AppInfo = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     VkInstanceCreateInfo m_InstanceInfo = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
