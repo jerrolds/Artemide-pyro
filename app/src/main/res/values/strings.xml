@@ -139,6 +139,16 @@
     <string name="perf_overlay_pyrowave_frames">Frames dropped: %1$d superseded, %2$d undecodable, %3$d partial</string>
     <string name="perf_overlay_pyrowave_cputime">CPU time per frame: %1$.2f ms decode, %2$.2f ms present</string>
     <string name="perf_overlay_pyrowave_lite_drops">drops: %1$d</string>
+    <string name="perf_overlay_pyrowave_format">Format: %1$s</string>
+    <string name="perf_overlay_pyrowave_gpu">GPU: %1$s</string>
+    <string name="perf_overlay_pyrowave_pipeline">Pipeline: %1$d frames in flight, %2$d decoded surfaces, %3$d swapchain images (%4$s), performance hint: %5$s</string>
+    <string name="perf_overlay_pyrowave_videodata">Video data: %1$.0f KB/frame, %2$.1f Mbps, %3$.2f bits/pixel</string>
+    <string name="perf_overlay_pyrowave_packets">Packets: %1$d received, %2$d lost (%3$.2f%%)</string>
+    <string name="perf_overlay_pyrowave_arrival">Frame arrival: %1$.1f ms average, %2$.1f ms jitter, %3$.1f ms worst gap</string>
+    <string name="perf_overlay_pyrowave_worstframe">Slowest frame (CPU): %1$.1f ms</string>
+    <string name="perf_overlay_pyrowave_gputime">GPU time: %1$.2f ms decode + %2$.2f ms colour conversion (%3$d timed frames)</string>
+    <string name="perf_overlay_pyrowave_gputime_waiting">GPU time: waiting for the first timed frame</string>
+    <string name="perf_overlay_pyrowave_gputime_unavailable">GPU time: not available on this device</string>
 
     <!-- Performance Report Sharing -->
     <string name="email_prefix_message">

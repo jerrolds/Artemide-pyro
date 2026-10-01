@@ -254,7 +254,9 @@ public class NvConnection {
         }
 
         context.negotiatedHdr = (context.streamConfig.getSupportedVideoFormats() & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0;
-        if ((context.serverCodecModeSupport & 0x20200) == 0 && context.negotiatedHdr) {
+        // HEVC Main10 or AV1 Main10, or PyroWave HDR10
+        final int hdrCapableHost = 0x20200 | MoonBridge.SCM_PYROWAVE_HDR10 | MoonBridge.SCM_PYROWAVE_HDR10_444;
+        if ((context.serverCodecModeSupport & hdrCapableHost) == 0 && context.negotiatedHdr) {
             context.connListener.displayTransientMessage("Your PC GPU does not support streaming HDR. The stream will be SDR.");
             context.negotiatedHdr = false;
         }

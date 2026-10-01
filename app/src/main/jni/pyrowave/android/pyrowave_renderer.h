@@ -35,6 +35,28 @@ typedef struct _PW_RENDERER_STATS {
     uint32_t outputHeight;
     bool fragmentPath;        // decoder uses PyroWave's mobile (fragment shader) path
     bool mailbox;             // swapchain presents in mailbox mode (else FIFO)
+    bool hdr;                 // swapchain is HDR10 (10-bit, PQ)
+
+    // Detail for the overlay. Totals are cumulative like the counters above; the two
+    // peaks (maxArrivalGapUs, maxFrameUs) cover the time since the previous call.
+    uint64_t receivedBytes;   // PyroWave payload handed over, in bytes
+    uint64_t packetsTotal;    // RTP packets in those frames
+    uint64_t packetsLost;     // of which never arrived (after error correction)
+    uint64_t arrivalCount;    // intervals between frames
+    uint64_t arrivalSumUs;    // sum of those intervals, each capped at 100 ms
+    uint64_t arrivalSqSumUs;  // sum of their squares, for the jitter
+    uint32_t maxArrivalGapUs; // longest gap between two frames
+    uint32_t maxFrameUs;      // slowest decode-and-present on the render thread (CPU wall time)
+    uint32_t colorspace;      // COLORSPACE_* of the latest frame
+    uint32_t swapchainFormat; // VkFormat of the swapchain images (0 without a window)
+    uint32_t swapchainImages;
+    uint32_t hintKind;        // performance hint session: 0 none, 1 plain, 2 graphics pipeline
+    uint32_t framesInFlight;
+    uint32_t surfaceCount;    // decoded surfaces
+    bool gpuTimingEnabled;
+    uint64_t gpuDecodeUs;     // GPU time of the decode, summed over the timed frames
+    uint64_t gpuConvertUs;    // GPU time of the colour conversion and draw
+    uint64_t gpuSamples;      // number of timed frames
 } PW_RENDERER_STATS;
 
 // Whether this device can decode and present PyroWave (Vulkan 1.3 and the

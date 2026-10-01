@@ -52,7 +52,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveCleanup(JNIEnv* env, jclass c
     PwRendererCleanup();
 }
 
-// Fills stats (length >= 13) in the order of MoonBridge.PYROWAVE_STAT_*
+// Fills stats (length >= 32) in the order of MoonBridge.PYROWAVE_STAT_*
 JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetStats(JNIEnv* env, jclass clazz, jlongArray stats) {
     PW_RENDERER_STATS s;
@@ -61,7 +61,12 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetStats(JNIEnv* env, jclass 
         s.receivedFrames, s.replacedFrames, s.rejectedFrames, s.partialFrames,
         s.decodedFrames, s.presentedFrames, s.noWindowFrames,
         (jlong)s.totalDecodeUs, (jlong)s.totalPresentUs,
-        s.outputWidth, s.outputHeight, s.fragmentPath ? 1 : 0, s.mailbox ? 1 : 0,
+        s.outputWidth, s.outputHeight, s.fragmentPath ? 1 : 0, s.mailbox ? 1 : 0, s.hdr ? 1 : 0,
+        (jlong)s.receivedBytes, (jlong)s.packetsTotal, (jlong)s.packetsLost,
+        (jlong)s.arrivalCount, (jlong)s.arrivalSumUs, (jlong)s.arrivalSqSumUs,
+        s.maxArrivalGapUs, s.maxFrameUs, s.colorspace, s.swapchainFormat, s.swapchainImages,
+        s.hintKind, s.framesInFlight, s.surfaceCount, s.gpuTimingEnabled ? 1 : 0,
+        (jlong)s.gpuDecodeUs, (jlong)s.gpuConvertUs, (jlong)s.gpuSamples,
     };
     const jsize count = sizeof(values) / sizeof(values[0]);
     if (env->GetArrayLength(stats) >= count) {

@@ -20,14 +20,23 @@ public class MoonBridge {
     public static final int VIDEO_FORMAT_MASK_H264 = 0x000F;
     public static final int VIDEO_FORMAT_MASK_H265 = 0x0F00;
     public static final int VIDEO_FORMAT_MASK_AV1 = 0xF000;
-    public static final int VIDEO_FORMAT_MASK_10BIT = 0x2200;
+    // Includes the PyroWave HDR10 formats, as in Limelight.h: a 10-bit format is what
+    // makes the connection ask the host to turn HDR on
+    public static final int VIDEO_FORMAT_MASK_10BIT = 0xCAA00;
 
-    // PyroWave (intra-only GPU wavelet codec, Vibepollo extension). Only the
-    // 8-bit 4:2:0 profile is requested. See docs/PYROWAVE_DECODE_PATH.md.
+    // PyroWave (intra-only GPU wavelet codec, Vibepollo extension). The 8-bit 4:2:0
+    // profile is always requested; HDR10 (10-bit 4:2:0) is added when HDR is enabled.
+    // See docs/PYROWAVE_DECODE_PATH.md.
     public static final int VIDEO_FORMAT_PYROWAVE = 0x010000;
+    public static final int VIDEO_FORMAT_PYROWAVE_444 = 0x020000;
+    public static final int VIDEO_FORMAT_PYROWAVE_HDR10 = 0x040000;
+    public static final int VIDEO_FORMAT_PYROWAVE_HDR10_444 = 0x080000;
     public static final int VIDEO_FORMAT_MASK_PYROWAVE = 0x0F0000;
-    // ServerCodecModeSupport bit of a host that can stream 8-bit 4:2:0 PyroWave
+    // ServerCodecModeSupport bits of a host that can stream PyroWave
     public static final int SCM_PYROWAVE = 0x00800000;
+    public static final int SCM_PYROWAVE_444 = 0x01000000;
+    public static final int SCM_PYROWAVE_HDR10 = 0x02000000;
+    public static final int SCM_PYROWAVE_HDR10_444 = 0x04000000;
 
     // Order of the values pyroWaveGetStats() fills in
     public static final int PYROWAVE_STAT_RECEIVED = 0;
@@ -43,7 +52,26 @@ public class MoonBridge {
     public static final int PYROWAVE_STAT_OUTPUT_HEIGHT = 10;
     public static final int PYROWAVE_STAT_FRAGMENT_PATH = 11;
     public static final int PYROWAVE_STAT_MAILBOX = 12;
-    public static final int PYROWAVE_STAT_COUNT = 13;
+    public static final int PYROWAVE_STAT_HDR = 13;
+    public static final int PYROWAVE_STAT_BYTES = 14;
+    public static final int PYROWAVE_STAT_PACKETS = 15;
+    public static final int PYROWAVE_STAT_PACKETS_LOST = 16;
+    public static final int PYROWAVE_STAT_ARRIVALS = 17;
+    public static final int PYROWAVE_STAT_ARRIVAL_SUM_US = 18;
+    public static final int PYROWAVE_STAT_ARRIVAL_SQ_SUM_US = 19;
+    public static final int PYROWAVE_STAT_MAX_GAP_US = 20; // peak since the last read
+    public static final int PYROWAVE_STAT_MAX_FRAME_US = 21; // peak since the last read
+    public static final int PYROWAVE_STAT_COLORSPACE = 22;
+    public static final int PYROWAVE_STAT_SWAPCHAIN_FORMAT = 23; // VkFormat
+    public static final int PYROWAVE_STAT_SWAPCHAIN_IMAGES = 24;
+    public static final int PYROWAVE_STAT_HINT_KIND = 25; // 0 none, 1 plain, 2 graphics pipeline
+    public static final int PYROWAVE_STAT_FRAMES_IN_FLIGHT = 26;
+    public static final int PYROWAVE_STAT_SURFACES = 27;
+    public static final int PYROWAVE_STAT_GPU_TIMING = 28;
+    public static final int PYROWAVE_STAT_GPU_DECODE_US = 29;
+    public static final int PYROWAVE_STAT_GPU_CONVERT_US = 30;
+    public static final int PYROWAVE_STAT_GPU_SAMPLES = 31;
+    public static final int PYROWAVE_STAT_COUNT = 32;
 
     public static final int BUFFER_TYPE_PICDATA = 0;
     public static final int BUFFER_TYPE_SPS = 1;

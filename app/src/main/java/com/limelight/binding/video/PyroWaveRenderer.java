@@ -28,6 +28,10 @@ public class PyroWaveRenderer {
 
     private int width;
     private int height;
+    // The negotiated format; whether the screen shows 10-bit as HDR is a stat
+    private boolean tenBit;
+    private boolean chroma444;
+    private boolean fullRange;
 
     private Thread statsThread;
     private volatile boolean statsRunning;
@@ -45,8 +49,12 @@ public class PyroWaveRenderer {
     public int setup(int videoFormat, int width, int height, int frameRate, boolean fullRange) {
         this.width = width;
         this.height = height;
+        this.tenBit = (videoFormat & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0;
+        this.chroma444 = (videoFormat & (MoonBridge.VIDEO_FORMAT_PYROWAVE_444 | MoonBridge.VIDEO_FORMAT_PYROWAVE_HDR10_444)) != 0;
+        this.fullRange = fullRange;
         LimeLog.info("PyroWave: " + width + "x" + height + "@" + frameRate +
-                (fullRange ? " full range" : " limited range") + ", " + MoonBridge.getPyroWaveStatus());
+                (fullRange ? " full range" : " limited range") + (tenBit ? ", 10-bit HDR10" : ", 8-bit") +
+                ", " + MoonBridge.getPyroWaveStatus());
         return MoonBridge.pyroWaveSetup(videoFormat, width, height, frameRate, fullRange);
     }
 
@@ -124,6 +132,13 @@ public class PyroWaveRenderer {
 
         String path = cur[MoonBridge.PYROWAVE_STAT_FRAGMENT_PATH] != 0 ? "fragment" : "compute";
         String mode = cur[MoonBridge.PYROWAVE_STAT_MAILBOX] != 0 ? "mailbox" : "FIFO";
+        // What the screen is really showing: HDR10 output, or a 10-bit stream shown in SDR
+        if (cur[MoonBridge.PYROWAVE_STAT_HDR] != 0) {
+            mode += ", HDR10";
+        }
+        else if (tenBit) {
+            mode += ", 10-bit SDR";
+        }
 
         // Bandwidth is app traffic (video + audio + control) over the window
         String bandwidth = null;
@@ -143,6 +158,42 @@ public class PyroWaveRenderer {
         lastHostLatencySum = host[0];
         lastHostLatencyCount = host[1];
 
+        // Detail over the window: what the host sends, how evenly it arrives and what the GPU spends
+        long bytes = cur[MoonBridge.PYROWAVE_STAT_BYTES] - prev[MoonBridge.PYROWAVE_STAT_BYTES];
+        long packets = cur[MoonBridge.PYROWAVE_STAT_PACKETS] - prev[MoonBridge.PYROWAVE_STAT_PACKETS];
+        long lostPackets = cur[MoonBridge.PYROWAVE_STAT_PACKETS_LOST] - prev[MoonBridge.PYROWAVE_STAT_PACKETS_LOST];
+        long arrivals = cur[MoonBridge.PYROWAVE_STAT_ARRIVALS] - prev[MoonBridge.PYROWAVE_STAT_ARRIVALS];
+        long arrivalSumUs = cur[MoonBridge.PYROWAVE_STAT_ARRIVAL_SUM_US] - prev[MoonBridge.PYROWAVE_STAT_ARRIVAL_SUM_US];
+        long arrivalSqUs = cur[MoonBridge.PYROWAVE_STAT_ARRIVAL_SQ_SUM_US] - prev[MoonBridge.PYROWAVE_STAT_ARRIVAL_SQ_SUM_US];
+        double gapMeanUs = arrivals > 0 ? (double) arrivalSumUs / arrivals : 0;
+        double gapVarianceUs = arrivals > 0 ? (double) arrivalSqUs / arrivals - gapMeanUs * gapMeanUs : 0;
+        float gapAvgMs = (float) (gapMeanUs / 1000.0);
+        float jitterMs = (float) (Math.sqrt(Math.max(0, gapVarianceUs)) / 1000.0);
+        float worstGapMs = cur[MoonBridge.PYROWAVE_STAT_MAX_GAP_US] / 1000f;
+        float worstFrameMs = cur[MoonBridge.PYROWAVE_STAT_MAX_FRAME_US] / 1000f;
+        float kbPerFrame = received > 0 ? bytes / 1024f / received : 0;
+        float videoMbps = (float) (bytes * 8 / seconds / 1e6);
+        float bitsPerPixel = (received > 0 && width * height > 0) ? (float) (bytes * 8.0 / received / ((double) width * height)) : 0;
+        float lossPercent = packets > 0 ? 100f * lostPackets / packets : 0;
+        long gpuSamples = cur[MoonBridge.PYROWAVE_STAT_GPU_SAMPLES] - prev[MoonBridge.PYROWAVE_STAT_GPU_SAMPLES];
+        float gpuDecodeMs = gpuSamples > 0 ?
+                (cur[MoonBridge.PYROWAVE_STAT_GPU_DECODE_US] - prev[MoonBridge.PYROWAVE_STAT_GPU_DECODE_US]) / 1000f / gpuSamples : 0;
+        float gpuConvertMs = gpuSamples > 0 ?
+                (cur[MoonBridge.PYROWAVE_STAT_GPU_CONVERT_US] - prev[MoonBridge.PYROWAVE_STAT_GPU_CONVERT_US]) / 1000f / gpuSamples : 0;
+        boolean gpuTiming = cur[MoonBridge.PYROWAVE_STAT_GPU_TIMING] != 0;
+
+        boolean hdrOutput = cur[MoonBridge.PYROWAVE_STAT_HDR] != 0;
+        String format = (tenBit ? "10-bit" : "8-bit") + (chroma444 ? " 4:4:4" : " 4:2:0") +
+                (fullRange ? ", full range" : ", limited range") + ", " +
+                colorspaceName(cur[MoonBridge.PYROWAVE_STAT_COLORSPACE]) +
+                (hdrOutput ? ", HDR10 (PQ) output" : ", SDR output");
+        String hint;
+        switch ((int) cur[MoonBridge.PYROWAVE_STAT_HINT_KIND]) {
+            case 2: hint = "graphics pipeline"; break;
+            case 1: hint = "plain session"; break;
+            default: hint = "none"; break;
+        }
+
         StringBuilder sb = new StringBuilder();
         if (prefs.enablePerfOverlayLite) {
             sb.append("PyroWave\t FPS: ").append(context.getString(R.string.perf_overlay_lite_fps, presentedFps));
@@ -155,20 +206,39 @@ public class PyroWaveRenderer {
         else {
             sb.append(context.getString(R.string.perf_overlay_streamdetails, width + "x" + height, presentedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_decoder, "PyroWave (Vulkan, " + path + " path)")).append('\n');
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_format, format)).append('\n');
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_gpu, MoonBridge.getPyroWaveStatus())).append('\n');
             sb.append(context.getString(R.string.perf_overlay_pyrowave_output,
                     cur[MoonBridge.PYROWAVE_STAT_OUTPUT_WIDTH] + "x" + cur[MoonBridge.PYROWAVE_STAT_OUTPUT_HEIGHT], mode)).append('\n');
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_pipeline,
+                    (int) cur[MoonBridge.PYROWAVE_STAT_FRAMES_IN_FLIGHT], (int) cur[MoonBridge.PYROWAVE_STAT_SURFACES],
+                    (int) cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_IMAGES],
+                    swapchainFormatName(cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_FORMAT]), hint)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_incomingfps, receivedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_renderingfps, presentedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_pyrowave_frames, replaced, rejected, partial)).append('\n');
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_videodata, kbPerFrame, videoMbps, bitsPerPixel)).append('\n');
             if (bandwidth != null) {
                 sb.append(context.getString(R.string.perf_overlay_lite_bandwidth)).append(": ").append(bandwidth).append('\n');
             }
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_packets, packets, lostPackets, lossPercent)).append('\n');
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_arrival, gapAvgMs, jitterMs, worstGapMs)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_netlatency, (int) (rttInfo >> 32), (int) rttInfo)).append('\n');
             if (hostFrames > 0 && host[2] != 0xFFFFFFFFL) {
                 sb.append(context.getString(R.string.perf_overlay_hostprocessinglatency,
                         host[2] / 10f, host[3] / 10f, hostAvg / 10f)).append('\n');
             }
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_cputime, decodeMs, presentMs));
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_cputime, decodeMs, presentMs)).append('\n');
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_worstframe, worstFrameMs)).append('\n');
+            if (gpuTiming && gpuSamples > 0) {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime, gpuDecodeMs, gpuConvertMs, gpuSamples));
+            }
+            else if (gpuTiming) {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime_waiting));
+            }
+            else {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime_unavailable));
+            }
         }
 
         if (prefs.enablePerfLogging) {
@@ -177,7 +247,39 @@ public class PyroWaveRenderer {
                             "CPU %.2f ms decode + %.2f ms present, output %dx%d %s",
                     receivedFps, presentedFps, replaced, rejected, partial, decodeMs, presentMs,
                     cur[MoonBridge.PYROWAVE_STAT_OUTPUT_WIDTH], cur[MoonBridge.PYROWAVE_STAT_OUTPUT_HEIGHT], mode));
+            // The detail on a second line so that tools reading the first one are unaffected
+            LimeLog.info(String.format(Locale.ROOT,
+                    "PyroWave detail: %s; GPU %.2f ms decode + %.2f ms convert (%d timed); " +
+                            "arrival %.2f ms avg, %.2f ms jitter, %.1f ms worst gap; %.0f KB/frame, %.1f Mbps video, " +
+                            "%.2f bits/pixel; packets %d, lost %d (%.2f%%); slowest frame %.1f ms; " +
+                            "%d in flight, %d surfaces, %d swapchain images (%s), hint %s",
+                    format, gpuDecodeMs, gpuConvertMs, gpuSamples, gapAvgMs, jitterMs, worstGapMs,
+                    kbPerFrame, videoMbps, bitsPerPixel, packets, lostPackets, lossPercent, worstFrameMs,
+                    cur[MoonBridge.PYROWAVE_STAT_FRAMES_IN_FLIGHT], cur[MoonBridge.PYROWAVE_STAT_SURFACES],
+                    cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_IMAGES],
+                    swapchainFormatName(cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_FORMAT]), hint));
         }
         return sb.toString();
+    }
+
+    private static String colorspaceName(long colorspace) {
+        switch ((int) colorspace) {
+            case MoonBridge.COLORSPACE_REC_601: return "Rec.601";
+            case MoonBridge.COLORSPACE_REC_709: return "Rec.709";
+            case MoonBridge.COLORSPACE_REC_2020: return "Rec.2020";
+            default: return "colorspace " + colorspace;
+        }
+    }
+
+    // VkFormat values of the swapchain formats the renderer can pick
+    private static String swapchainFormatName(long vkFormat) {
+        switch ((int) vkFormat) {
+            case 0: return "no window";
+            case 37: return "R8G8B8A8";
+            case 44: return "B8G8R8A8";
+            case 58: return "A2R10G10B10";
+            case 64: return "A2B10G10R10";
+            default: return "VkFormat " + vkFormat;
+        }
     }
 }

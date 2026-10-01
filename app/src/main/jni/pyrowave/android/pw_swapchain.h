@@ -20,9 +20,16 @@ public:
     // Takes its own reference to window. The device must be idle when a
     // swapchain is replaced or destroyed.
     bool create(PwVulkan& vulkan, ANativeWindow* window, std::string& error);
-    // Rebuilds the swapchain for the same window (size or transform changed)
+    // Rebuilds the swapchain for the same window (size, transform or HDR mode changed)
     bool recreate(std::string& error);
     void destroy();
+
+    // Asks for an HDR10 (10-bit, PQ) swapchain at the next build. If the device or
+    // surface cannot offer one the swapchain falls back to SDR: see hdr().
+    void setHdr(bool wanted) { m_WantHdr = wanted; }
+    bool wantsHdr() const { return m_WantHdr; }
+    // Whether the current swapchain really is HDR10
+    bool hdr() const { return m_Hdr; }
 
     bool valid() const { return m_Swapchain != VK_NULL_HANDLE; }
     VkSwapchainKHR handle() const { return m_Swapchain; }
@@ -40,7 +47,10 @@ public:
 private:
     bool build(std::string& error);
     void destroyImages();
+    void applyHdrMetadata();
 
+    bool m_WantHdr = false;
+    bool m_Hdr = false;
     PwVulkan* m_Vulkan = nullptr;
     ANativeWindow* m_Window = nullptr;
     VkSurfaceKHR m_Surface = VK_NULL_HANDLE;
