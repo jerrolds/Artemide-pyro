@@ -152,7 +152,7 @@ bool PwSwapchain::build(std::string& error)
     }
 
     uint32_t imageCount = m_PresentMode == VK_PRESENT_MODE_MAILBOX_KHR ?
-                          std::max(caps.minImageCount, 3u) : caps.minImageCount;
+                          std::max(caps.minImageCount, 4u) : caps.minImageCount;
     if (caps.maxImageCount != 0) {
         imageCount = std::min(imageCount, caps.maxImageCount);
     }
