@@ -461,6 +461,8 @@ public class MoonBridge {
     public static native void pyroWaveCleanup();
 
     public static native void pyroWaveGetStats(long[] stats);
+    // {sum, count, min, max} of host processing latency in 0.1 ms; min/max reset on each call
+    public static native void pyroWaveGetHostLatency(long[] out);
 
     public static native void init();
 }

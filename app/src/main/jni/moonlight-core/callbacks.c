@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include <Limelight.h>
@@ -43,6 +44,12 @@ static jmethodID BridgeClSetControllerLEDMethod;
 static jbyteArray DecodedFrameBuffer;
 // PyroWave frames go to the native renderer; see pyrowave_renderer.h
 static bool PyroWaveActive;
+// Host processing latency (tenths of a ms) of PyroWave frames, for the overlay.
+// Written by the decoder thread, read once a second by the Java stats thread.
+static _Atomic uint64_t PyroWaveHostLatencySum;
+static _Atomic uint64_t PyroWaveHostLatencyCount;
+static _Atomic uint32_t PyroWaveHostLatencyMin = UINT32_MAX;
+static _Atomic uint32_t PyroWaveHostLatencyMax;
 static jshortArray DecodedAudioBuffer;
 
 void DetachThread(void* context) {
@@ -155,6 +162,18 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     // PyroWave frames never enter Java: the renderer needs each packet's
     // lost/record-start flags, which the byte array below would discard
     if (PyroWaveActive) {
+        // Only Sunshine-family hosts report this; zero means not provided
+        uint32_t latency = decodeUnit->frameHostProcessingLatency;
+        if (latency != 0) {
+            atomic_fetch_add_explicit(&PyroWaveHostLatencySum, latency, memory_order_relaxed);
+            atomic_fetch_add_explicit(&PyroWaveHostLatencyCount, 1, memory_order_relaxed);
+            if (latency < atomic_load_explicit(&PyroWaveHostLatencyMin, memory_order_relaxed)) {
+                atomic_store_explicit(&PyroWaveHostLatencyMin, latency, memory_order_relaxed);
+            }
+            if (latency > atomic_load_explicit(&PyroWaveHostLatencyMax, memory_order_relaxed)) {
+                atomic_store_explicit(&PyroWaveHostLatencyMax, latency, memory_order_relaxed);
+            }
+        }
         return PwRendererSubmitDecodeUnit(decodeUnit);
     }
 
@@ -463,6 +482,22 @@ hasFastAes() {
             // Assume new architectures will all have crypto acceleration (RISC-V will)
             return true;
     }
+}
+
+// Fills out[4] with {sum, count} (cumulative) and {min, max} since the last call,
+// all in tenths of a ms. Min/max are UINT32_MAX/0 if no frame carried a latency.
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetHostLatency(JNIEnv *env, jclass clazz, jlongArray out) {
+    if ((*env)->GetArrayLength(env, out) < 4) {
+        return;
+    }
+    const jlong values[] = {
+        (jlong)atomic_load_explicit(&PyroWaveHostLatencySum, memory_order_relaxed),
+        (jlong)atomic_load_explicit(&PyroWaveHostLatencyCount, memory_order_relaxed),
+        (jlong)atomic_exchange_explicit(&PyroWaveHostLatencyMin, UINT32_MAX, memory_order_relaxed),
+        (jlong)atomic_exchange_explicit(&PyroWaveHostLatencyMax, 0, memory_order_relaxed),
+    };
+    (*env)->SetLongArrayRegion(env, out, 0, 4, values);
 }
 
 JNIEXPORT jint JNICALL
