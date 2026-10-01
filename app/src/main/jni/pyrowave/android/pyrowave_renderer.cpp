@@ -12,6 +12,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -103,6 +104,7 @@ public:
             if (createUsingConfig(manager, config, &session) == 0 && session != nullptr) {
                 m_Session = session;
                 kind = "graphics pipeline";
+                m_Kind = 2;
             }
             cfgRelease(config);
         }
@@ -117,6 +119,9 @@ public:
         if (m_Session == nullptr) {
             pwLog(ANDROID_LOG_INFO, "Performance hints: could not create a session");
             return;
+        }
+        if (m_Kind == 0) {
+            m_Kind = 1;
         }
 
         m_TargetNs = targetNs;
@@ -170,7 +175,11 @@ public:
             m_Close(m_Session);
         }
         m_Session = nullptr;
+        m_Kind = 0;
     }
+
+    // 0: no session, 1: plain session, 2: graphics pipeline session
+    int kind() const { return m_Kind; }
 
 private:
     template <typename F>
@@ -184,6 +193,7 @@ private:
     int64_t m_TargetNs = 0;
     int64_t m_LastNotifyNs = 0;
     int m_Over = 0;
+    int m_Kind = 0;
     void (*m_Close)(APerformanceHintSession*) = nullptr;
     int (*m_Report)(APerformanceHintSession*, int64_t) = nullptr;
     int (*m_Report2)(APerformanceHintSession*, AWorkDuration*) = nullptr;
@@ -194,6 +204,158 @@ private:
     void (*m_DurTotal)(AWorkDuration*, int64_t) = nullptr;
     void (*m_DurCpu)(AWorkDuration*, int64_t) = nullptr;
     void (*m_DurGpu)(AWorkDuration*, int64_t) = nullptr;
+};
+
+// Times the GPU side of a frame. The decode is submitted by PyroWave itself and cannot carry
+// timestamps, so tiny command buffers on the same queue write one before the decode, one
+// after it and one after the colour conversion; queue order makes the differences the GPU time
+// of each stage. Only one frame in kSampleEvery is timed, so the extra submissions cost almost
+// nothing, and a slot's results are read only once all three timestamps are available.
+class GpuTimer {
+public:
+    static constexpr int kSampleEvery = 8;
+    static constexpr int kStamps = 3; // before decode, after decode, after colour conversion
+    static constexpr int kMaxSlots = 4;
+
+    bool init(PwVulkan& vulkan, VkCommandPool pool, int slots)
+    {
+        m_Vulkan = &vulkan;
+        if (!vulkan.canTimestamp() || slots <= 0 || slots > kMaxSlots) {
+            return false;
+        }
+        VkDevice device = vulkan.device();
+        const uint32_t count = uint32_t(slots * kStamps);
+
+        VkQueryPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        poolInfo.queryCount = count;
+        if (vkCreateQueryPool(device, &poolInfo, nullptr, &m_Pool) != VK_SUCCESS) {
+            m_Pool = VK_NULL_HANDLE;
+            return false;
+        }
+        vkResetQueryPool(device, m_Pool, 0, count);
+
+        VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        allocInfo.commandPool = pool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = count;
+        if (vkAllocateCommandBuffers(device, &allocInfo, m_Commands) != VK_SUCCESS) {
+            destroy();
+            return false;
+        }
+        // Each command buffer only writes its own timestamp, so it is recorded once and reused
+        for (uint32_t i = 0; i < count; i++) {
+            VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            vkBeginCommandBuffer(m_Commands[i], &beginInfo);
+            vkCmdWriteTimestamp2(m_Commands[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, m_Pool, i);
+            vkEndCommandBuffer(m_Commands[i]);
+        }
+
+        const uint32_t bits = vulkan.timestampValidBits();
+        m_Mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
+        m_PeriodNs = double(vulkan.timestampPeriodNs());
+        m_Enabled = true;
+        return true;
+    }
+
+    void destroy()
+    {
+        m_Enabled = false;
+        if (m_Pool != VK_NULL_HANDLE && m_Vulkan != nullptr) {
+            vkDestroyQueryPool(m_Vulkan->device(), m_Pool, nullptr);
+        }
+        m_Pool = VK_NULL_HANDLE;
+    }
+
+    bool enabled() const { return m_Enabled; }
+
+    // Starts timing the frame that uses this slot, if it is one of the sampled frames
+    bool begin(int slot)
+    {
+        if (!m_Enabled || ++m_Counter % kSampleEvery != 0) {
+            return false;
+        }
+        Slot& s = m_Slots[slot];
+        if (s.pending && !harvest(slot)) {
+            return false; // the GPU has not finished the previous sample of this slot
+        }
+        s.pending = true;
+        s.valid = true;
+        stamp(slot, 0);
+        return true;
+    }
+
+    // ok is false if the stage failed: the remaining timestamps are still written so
+    // that the slot can be reused, but the sample is discarded
+    void decoded(int slot, bool ok)
+    {
+        m_Slots[slot].valid = m_Slots[slot].valid && ok;
+        stamp(slot, 1);
+    }
+
+    void presented(int slot, bool ok)
+    {
+        m_Slots[slot].valid = m_Slots[slot].valid && ok;
+        stamp(slot, 2);
+    }
+
+    uint64_t decodeUs() const { return m_DecodeUs; }
+    uint64_t convertUs() const { return m_ConvertUs; }
+    uint64_t samples() const { return m_Samples; }
+
+private:
+    struct Slot {
+        bool pending = false;
+        bool valid = false;
+    };
+
+    void stamp(int slot, int which)
+    {
+        VkCommandBufferSubmitInfo cmdInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
+        cmdInfo.commandBuffer = m_Commands[slot * kStamps + which];
+        VkSubmitInfo2 submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &cmdInfo;
+        std::lock_guard<std::mutex> guard(m_Vulkan->queueLock());
+        vkQueueSubmit2(m_Vulkan->queue(), 1, &submitInfo, VK_NULL_HANDLE);
+    }
+
+    // Reads and clears a slot's timestamps; false if they are not all available yet
+    bool harvest(int slot)
+    {
+        VkDevice device = m_Vulkan->device();
+        uint64_t data[kStamps * 2] = {}; // value, availability for each timestamp
+        const VkResult result = vkGetQueryPoolResults(device, m_Pool, uint32_t(slot * kStamps), kStamps,
+                                                      sizeof(data), data, 2 * sizeof(uint64_t),
+                                                      VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (result != VK_SUCCESS) {
+            return false;
+        }
+        for (int i = 0; i < kStamps; i++) {
+            if (data[i * 2 + 1] == 0) {
+                return false;
+            }
+        }
+        if (m_Slots[slot].valid) {
+            const double toUs = m_PeriodNs / 1000.0;
+            m_DecodeUs += uint64_t(double((data[2] - data[0]) & m_Mask) * toUs);
+            m_ConvertUs += uint64_t(double((data[4] - data[2]) & m_Mask) * toUs);
+            m_Samples++;
+        }
+        vkResetQueryPool(device, m_Pool, uint32_t(slot * kStamps), kStamps);
+        m_Slots[slot].pending = false;
+        return true;
+    }
+
+    PwVulkan* m_Vulkan = nullptr;
+    VkQueryPool m_Pool = VK_NULL_HANDLE;
+    VkCommandBuffer m_Commands[kMaxSlots * kStamps] = {};
+    Slot m_Slots[kMaxSlots];
+    uint64_t m_Mask = 0;
+    double m_PeriodNs = 0.0;
+    uint32_t m_Counter = 0;
+    bool m_Enabled = false;
+    std::atomic<uint64_t> m_DecodeUs { 0 }, m_ConvertUs { 0 }, m_Samples { 0 };
 };
 
 // Enough for the decode of one frame to overlap the render of the previous
@@ -208,6 +370,7 @@ struct Frame {
     size_t criticalPackets = 0;
     int colorspace = COLORSPACE_REC_709;
     int frameNumber = 0;
+    bool hdr = false; // HDR10: PQ-encoded, normally BT.2020
 };
 
 class Renderer {
@@ -265,7 +428,20 @@ private:
     std::atomic<uint64_t> m_DecodeUs { 0 }, m_PresentUs { 0 };
     std::atomic<uint32_t> m_OutputWidth { 0 }, m_OutputHeight { 0 };
     std::atomic<bool> m_Mailbox { false };
+    std::atomic<bool> m_HdrOutput { false };
     uint64_t m_LastErrorLogUs = 0;
+
+    // Detail for the overlay. Counted on the submitting thread, read by the stats thread.
+    std::atomic<uint64_t> m_ReceivedBytes { 0 };
+    std::atomic<uint64_t> m_PacketsTotal { 0 }, m_PacketsLost { 0 };
+    std::atomic<uint64_t> m_ArrivalCount { 0 }, m_ArrivalSumUs { 0 }, m_ArrivalSqSumUs { 0 };
+    uint64_t m_LastArrivalUs = 0; // submitting thread only
+    // Peaks since the last stats read
+    mutable std::atomic<uint32_t> m_MaxArrivalGapUs { 0 }, m_MaxFrameUs { 0 };
+    std::atomic<int> m_Colorspace { COLORSPACE_REC_709 };
+    std::atomic<uint32_t> m_SwapchainFormat { 0 }, m_SwapchainImages { 0 };
+    std::atomic<int> m_HintKind { 0 };
+    GpuTimer m_GpuTimer; // only touched by the render thread, apart from its totals
 };
 
 Renderer::~Renderer()
@@ -276,6 +452,7 @@ Renderer::~Renderer()
     }
     waitIdle();
     m_Swapchain.destroy();
+    m_GpuTimer.destroy();
     VkDevice device = m_Vulkan.device();
     for (int i = 0; i < k_FramesInFlight; i++) {
         if (m_AcquireSemaphores[i] != VK_NULL_HANDLE) {
@@ -296,6 +473,9 @@ void Renderer::publishOutput()
     m_OutputWidth = m_Swapchain.valid() ? m_Swapchain.extent().width : 0;
     m_OutputHeight = m_Swapchain.valid() ? m_Swapchain.extent().height : 0;
     m_Mailbox = m_Swapchain.valid() && m_Swapchain.presentMode() == VK_PRESENT_MODE_MAILBOX_KHR;
+    m_HdrOutput = m_Swapchain.valid() && m_Swapchain.hdr();
+    m_SwapchainFormat = m_Swapchain.valid() ? uint32_t(m_Swapchain.format()) : 0;
+    m_SwapchainImages = m_Swapchain.valid() ? m_Swapchain.imageCount() : 0;
 }
 
 void Renderer::waitIdle()
@@ -341,6 +521,10 @@ bool Renderer::setup(int videoFormat, int width, int height, bool fullRange, std
         error = "vkAllocateCommandBuffers failed";
         return false;
     }
+    // Optional: without it the overlay simply has no GPU timings
+    if (!m_GpuTimer.init(m_Vulkan, m_CommandPool, k_FramesInFlight)) {
+        pwLog(ANDROID_LOG_INFO, "GPU timing is not available on this device");
+    }
 
     VkSemaphoreCreateInfo semaphoreInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     for (auto& semaphore : m_AcquireSemaphores) {
@@ -385,10 +569,10 @@ void Renderer::setWindow(ANativeWindow* window)
         return;
     }
     publishOutput();
-    pwLog(ANDROID_LOG_INFO, "Presenting %ux%u, %s, rotation %d",
+    pwLog(ANDROID_LOG_INFO, "Presenting %ux%u, %s, rotation %d%s",
           m_Swapchain.extent().width, m_Swapchain.extent().height,
           m_Swapchain.presentMode() == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "FIFO",
-          m_Swapchain.rotation() * 90);
+          m_Swapchain.rotation() * 90, m_Swapchain.hdr() ? ", HDR10" : "");
 }
 
 void Renderer::start()
@@ -418,13 +602,31 @@ int Renderer::submit(PDECODE_UNIT du)
 {
     m_Received++;
 
+    // Time between frames reaching us: how evenly the network and the host deliver them
+    const uint64_t arrival = nowUs();
+    if (m_LastArrivalUs != 0) {
+        const uint64_t gap = std::min<uint64_t>(arrival - m_LastArrivalUs, 100000);
+        m_ArrivalCount++;
+        m_ArrivalSumUs += gap;
+        m_ArrivalSqSumUs += gap * gap;
+        uint32_t peak = m_MaxArrivalGapUs.load(std::memory_order_relaxed);
+        while (gap > peak && !m_MaxArrivalGapUs.compare_exchange_weak(peak, uint32_t(gap))) {
+        }
+    }
+    m_LastArrivalUs = arrival;
+
     // Copy the frame out of moonlight-common-c's buffers, one segment per RTP
     // packet so the parser knows what was lost and where records start
     Frame& frame = m_Staging;
     frame.data.resize(size_t(du->fullLength));
     frame.segments.clear();
     size_t offset = 0;
+    uint32_t packets = 0, lostPackets = 0;
     for (PLENTRY entry = du->bufferList; entry != nullptr; entry = entry->next) {
+        packets++;
+        if (entry->bufferType == BUFFER_TYPE_LOST) {
+            lostPackets++;
+        }
         const size_t length = size_t(entry->length);
         if (offset + length > frame.data.size()) {
             frame.data.resize(offset + length);
@@ -435,9 +637,14 @@ int Renderer::submit(PDECODE_UNIT du)
         offset += length;
     }
     frame.data.resize(offset);
+    m_ReceivedBytes += offset;
+    m_PacketsTotal += packets;
+    m_PacketsLost += lostPackets;
+    m_Colorspace = du->colorspace;
     frame.criticalPackets = du->pyrowaveCriticalPackets;
     frame.colorspace = du->colorspace;
     frame.frameNumber = du->frameNumber;
+    frame.hdr = du->hdrActive;
 
     {
         std::lock_guard<std::mutex> guard(m_FrameLock);
@@ -459,6 +666,7 @@ void Renderer::renderLoop()
     // The deadline is a little tighter than one frame at the tablet's 120 Hz (8.33 ms),
     // so a frame that only just fits still asks the system for a faster GPU clock
     m_PerfHint.start(7500000);
+    m_HintKind = m_PerfHint.kind();
     for (;;) {
         {
             std::unique_lock<std::mutex> lock(m_FrameLock);
@@ -483,12 +691,28 @@ void Renderer::process(const Frame& frame)
         return;
     }
 
+    // Follow the stream: HDR10 frames need an HDR swapchain and SDR frames an ordinary
+    // one. The rebuild happens in present(), which waits for the GPU to go idle first.
+    if (frame.hdr != m_Swapchain.wantsHdr()) {
+        m_Swapchain.setHdr(frame.hdr);
+        m_NeedRecreate = true;
+    }
+
+    // The slot of the frames in flight this frame will use, as present() picks it. One frame
+    // in a few has its GPU stages timed: begin() writes the first timestamp.
+    const int slot = int(m_FrameIndex % k_FramesInFlight);
+    const bool timed = m_GpuTimer.begin(slot);
+
     const uint64_t start = nowUs();
     const int surface = m_NextSurface;
     uint64_t decodeValue = 0;
     const uint64_t released = m_SurfaceReleased[surface];
     if (!m_Decoder.decode(frame.data.data(), frame.data.size(), frame.segments, frame.criticalPackets, surface,
                           released != 0 ? m_RenderTimeline : VK_NULL_HANDLE, released, decodeValue)) {
+        if (timed) {
+            m_GpuTimer.decoded(slot, false);
+            m_GpuTimer.presented(slot, false);
+        }
         m_Rejected++;
         // The next frame replaces this one; log at most once a second
         const uint64_t now = nowUs();
@@ -504,15 +728,28 @@ void Renderer::process(const Frame& frame)
         m_Partial++;
     }
     m_Decoded++;
+    if (timed) {
+        m_GpuTimer.decoded(slot, true);
+    }
 
     const uint64_t decoded = nowUs();
     m_DecodeUs += decoded - start;
 
-    if (present(surface, decodeValue, frame.colorspace)) {
+    const bool presented = present(surface, decodeValue, frame.colorspace);
+    if (presented) {
         m_Presented++;
+    }
+    if (timed) {
+        m_GpuTimer.presented(slot, presented);
     }
     const uint64_t end = nowUs();
     m_PresentUs += end - decoded;
+
+    // Slowest frame since the stats were last read
+    const uint32_t frameUs = uint32_t(std::min<uint64_t>(end - start, 1000000));
+    uint32_t peak = m_MaxFrameUs.load(std::memory_order_relaxed);
+    while (frameUs > peak && !m_MaxFrameUs.compare_exchange_weak(peak, frameUs)) {
+    }
 
     // Present mostly waits for the GPU to finish earlier frames, so it stands in for GPU time
     m_PerfHint.report(int64_t(start) * 1000, int64_t(end - start) * 1000,
@@ -534,6 +771,8 @@ bool Renderer::present(int surface, uint64_t decodeValue, int colorspace)
         }
         m_NeedRecreate = false;
         publishOutput();
+        pwLog(ANDROID_LOG_INFO, "Swapchain rebuilt: %s (%s requested)",
+              m_Swapchain.hdr() ? "HDR10" : "SDR", m_Swapchain.wantsHdr() ? "HDR" : "SDR");
     }
 
     // Reuse this slot's command buffer and acquire semaphore only once the
@@ -651,6 +890,26 @@ void Renderer::stats(PW_RENDERER_STATS* out) const
     out->outputHeight = m_OutputHeight;
     out->fragmentPath = m_Decoder.fragmentPath();
     out->mailbox = m_Mailbox;
+    out->hdr = m_HdrOutput;
+
+    out->receivedBytes = m_ReceivedBytes;
+    out->packetsTotal = m_PacketsTotal;
+    out->packetsLost = m_PacketsLost;
+    out->arrivalCount = m_ArrivalCount;
+    out->arrivalSumUs = m_ArrivalSumUs;
+    out->arrivalSqSumUs = m_ArrivalSqSumUs;
+    out->maxArrivalGapUs = m_MaxArrivalGapUs.exchange(0);
+    out->maxFrameUs = m_MaxFrameUs.exchange(0);
+    out->colorspace = uint32_t(m_Colorspace.load());
+    out->swapchainFormat = m_SwapchainFormat;
+    out->swapchainImages = m_SwapchainImages;
+    out->hintKind = uint32_t(m_HintKind.load());
+    out->framesInFlight = k_FramesInFlight;
+    out->surfaceCount = k_SurfaceCount;
+    out->gpuTimingEnabled = m_GpuTimer.enabled();
+    out->gpuDecodeUs = m_GpuTimer.decodeUs();
+    out->gpuConvertUs = m_GpuTimer.convertUs();
+    out->gpuSamples = m_GpuTimer.samples();
 }
 
 // Serializes the API entry points; the renderer exists between setup and cleanup

@@ -1,6 +1,9 @@
 #include "pw_swapchain.h"
 #include "pw_presenter.h"
 
+#include <Limelight.h>
+
+#include <android/log.h>
 #include <android/native_window.h>
 
 #include <algorithm>
@@ -83,6 +86,40 @@ void PwSwapchain::destroy()
     }
 }
 
+// Describes the host's mastering display to the screen, so it can tone map to its own peak
+void PwSwapchain::applyHdrMetadata()
+{
+    if (!m_Hdr || !m_Vulkan->hasHdrMetadata() || vkSetHdrMetadataEXT == nullptr) {
+        return;
+    }
+
+    VkHdrMetadataEXT info = { VK_STRUCTURE_TYPE_HDR_METADATA_EXT };
+    SS_HDR_METADATA host = {};
+    if (LiGetHdrMetadata(&host)) {
+        auto chromaticity = [](uint16_t value) { return float(value) / 50000.0f; };
+        info.displayPrimaryRed = { chromaticity(host.displayPrimaries[0].x), chromaticity(host.displayPrimaries[0].y) };
+        info.displayPrimaryGreen = { chromaticity(host.displayPrimaries[1].x), chromaticity(host.displayPrimaries[1].y) };
+        info.displayPrimaryBlue = { chromaticity(host.displayPrimaries[2].x), chromaticity(host.displayPrimaries[2].y) };
+        info.whitePoint = { chromaticity(host.whitePoint.x), chromaticity(host.whitePoint.y) };
+        info.maxLuminance = float(host.maxDisplayLuminance);
+        info.minLuminance = float(host.minDisplayLuminance) / 10000.0f;
+        info.maxContentLightLevel = float(host.maxContentLightLevel);
+        info.maxFrameAverageLightLevel = float(host.maxFrameAverageLightLevel);
+    }
+    else {
+        // The host sent none: a BT.2020 / D65 mastering display with a 1000 nit peak
+        info.displayPrimaryRed = { 0.708f, 0.292f };
+        info.displayPrimaryGreen = { 0.170f, 0.797f };
+        info.displayPrimaryBlue = { 0.131f, 0.046f };
+        info.whitePoint = { 0.3127f, 0.3290f };
+        info.maxLuminance = 1000.0f;
+        info.minLuminance = 0.001f;
+        info.maxContentLightLevel = 1000.0f;
+        info.maxFrameAverageLightLevel = 400.0f;
+    }
+    vkSetHdrMetadataEXT(m_Vulkan->device(), 1, &m_Swapchain, &info);
+}
+
 bool PwSwapchain::build(std::string& error)
 {
     VkPhysicalDevice physicalDevice = m_Vulkan->physicalDevice();
@@ -99,9 +136,37 @@ bool PwSwapchain::build(std::string& error)
     std::vector<VkSurfaceFormatKHR> formats(count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, m_Surface, &count, formats.data());
 
-    // The shader writes gamma-encoded values, so use a UNORM (not sRGB) format
+    // HDR10: the shader's output is already PQ-encoded BT.2020, which is what the
+    // HDR10_ST2084 colour space expects, so the same shader serves both modes
     VkSurfaceFormatKHR chosen = {};
+    bool hdr = false;
+    if (m_WantHdr) {
+        if (m_Vulkan->hasHdrColorSpace()) {
+            for (VkFormat wanted : { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2R10G10B10_UNORM_PACK32 }) {
+                for (const auto& format : formats) {
+                    if (format.format == wanted && format.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+                        chosen = format;
+                        hdr = true;
+                        break;
+                    }
+                }
+                if (hdr) {
+                    break;
+                }
+            }
+        }
+        if (!hdr) {
+            __android_log_print(ANDROID_LOG_WARN, "PyroWave",
+                                "HDR was requested but the surface offers no HDR10 swapchain format (%s)",
+                                m_Vulkan->hasHdrColorSpace() ? "no matching format" : "VK_EXT_swapchain_colorspace is missing");
+        }
+    }
+
+    // The shader writes gamma-encoded values, so use a UNORM (not sRGB) format
     for (VkFormat wanted : { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM }) {
+        if (hdr) {
+            break;
+        }
         for (const auto& format : formats) {
             if (format.format == wanted && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
                 chosen = format;
@@ -187,8 +252,10 @@ bool PwSwapchain::build(std::string& error)
     }
     m_Swapchain = swapchain;
     m_Format = chosen.format;
+    m_Hdr = hdr;
     m_Extent = extent;
     m_Rotation = pwRotationFromTransform(transform);
+    applyHdrMetadata();
 
     vkGetSwapchainImagesKHR(device, m_Swapchain, &count, nullptr);
     m_Images.resize(count);

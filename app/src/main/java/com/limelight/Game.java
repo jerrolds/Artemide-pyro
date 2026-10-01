@@ -679,8 +679,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             }
         } catch (Throwable ignored) {}
 
+        // PyroWave decodes on the GPU, so it does not depend on MediaCodec's HDR support
+        final boolean pyroWaveForced = prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE &&
+                PyroWaveRenderer.isAvailable();
+
         // Don't stream HDR if the decoder can't support it
-        if (willStreamHdr && !decoderRenderer.isHevcMain10Hdr10Supported() && !decoderRenderer.isAv1Main10Supported()) {
+        if (willStreamHdr && !pyroWaveForced && !decoderRenderer.isHevcMain10Hdr10Supported() && !decoderRenderer.isAv1Main10Supported()) {
             willStreamHdr = false;
             Toast.makeText(this, "Decoder does not support HDR10 profile", Toast.LENGTH_LONG).show();
         }
@@ -717,6 +721,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE) {
             if (PyroWaveRenderer.isAvailable()) {
                 supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE;
+                // The HDR setting also selects 10-bit: the host picks the best format it has,
+                // and a 10-bit format is what makes it turn HDR on
+                if (willStreamHdr) {
+                    supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE_HDR10;
+                }
                 if (prefConfig.bitrateIsDefault) {
                     nonPyroWaveBitrate = streamBitrate;
                     streamBitrate = PreferenceConfiguration.getDefaultPyroWaveBitrate(

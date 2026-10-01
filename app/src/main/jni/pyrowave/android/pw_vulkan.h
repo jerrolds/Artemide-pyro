@@ -29,6 +29,16 @@ public:
     uint32_t queueFamily() const { return m_QueueFamily; }
     const char* deviceName() const { return m_Properties.properties.deviceName; }
     bool hasSwapchain() const { return m_HasSwapchain; }
+    // VK_EXT_swapchain_colorspace: HDR10 swapchain formats can be offered
+    bool hasHdrColorSpace() const { return m_HasHdrColorSpace; }
+    // VK_EXT_hdr_metadata: the mastering display can be described to the display
+    bool hasHdrMetadata() const { return m_HasHdrMetadata; }
+
+    // GPU timestamps: the queue can write them and queries can be reset from the host
+    bool canTimestamp() const { return m_TimestampValidBits >= 32 && m_Features12.hostQueryReset; }
+    uint32_t timestampValidBits() const { return m_TimestampValidBits; }
+    // Nanoseconds per timestamp tick
+    float timestampPeriodNs() const { return m_Properties.properties.limits.timestampPeriod; }
 
     const VkInstanceCreateInfo* instanceCreateInfo() const { return &m_InstanceInfo; }
     const VkDeviceCreateInfo* deviceCreateInfo() const { return &m_DeviceInfo; }
@@ -45,6 +55,9 @@ private:
     VkQueue m_Queue = VK_NULL_HANDLE;
     uint32_t m_QueueFamily = 0;
     bool m_HasSwapchain = false;
+    bool m_HasHdrColorSpace = false;
+    bool m_HasHdrMetadata = false;
+    uint32_t m_TimestampValidBits = 0;
 
     VkApplicationInfo m_AppInfo = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     VkInstanceCreateInfo m_InstanceInfo = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };

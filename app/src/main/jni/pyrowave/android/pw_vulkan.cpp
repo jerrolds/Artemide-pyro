@@ -52,6 +52,11 @@ bool PwVulkan::create(bool withSurface, std::string& error)
         }
         m_InstanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
         m_InstanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+        // Optional: without it the swapchain only offers SDR formats
+        if (hasExtension(instanceExtensions, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) {
+            m_InstanceExtensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+            m_HasHdrColorSpace = true;
+        }
 #else
         error = "no surface platform in this build";
         return false;
@@ -98,6 +103,7 @@ bool PwVulkan::create(bool withSurface, std::string& error)
                 bestScore = score;
                 m_PhysicalDevice = candidate;
                 m_QueueFamily = i;
+                m_TimestampValidBits = families[i].timestampValidBits;
             }
             break;
         }
@@ -137,6 +143,10 @@ bool PwVulkan::create(bool withSurface, std::string& error)
         }
         m_DeviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
         m_HasSwapchain = true;
+        if (hasExtension(deviceExtensions, VK_EXT_HDR_METADATA_EXTENSION_NAME)) {
+            m_DeviceExtensions.push_back(VK_EXT_HDR_METADATA_EXTENSION_NAME);
+            m_HasHdrMetadata = true;
+        }
     }
 
     m_QueueInfo.queueFamilyIndex = m_QueueFamily;

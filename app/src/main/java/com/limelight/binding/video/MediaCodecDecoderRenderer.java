@@ -2045,7 +2045,8 @@ if (preferLowerDelays) {
     @Override
     public void setHdrMode(boolean enabled, byte[] hdrMetadata) {
         if (pyroWave != null) {
-            // Only 8-bit SDR PyroWave is requested
+            // PyroWave follows each frame's own HDR flag and reads the mastering
+            // metadata from the connection when it builds an HDR swapchain
             return;
         }
 
