@@ -255,6 +255,10 @@ public:
         m_Mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
         m_PeriodNs = double(vulkan.timestampPeriodNs());
         m_Enabled = true;
+
+        // The GPU clock can only be placed on CLOCK_MONOTONIC if the driver supports that time domain
+        uint64_t ticks = 0, nanoseconds = 0;
+        m_ClientTiming = vulkan.calibrate(ticks, nanoseconds);
         return true;
     }
 
@@ -268,9 +272,12 @@ public:
     }
 
     bool enabled() const { return m_Enabled; }
+    // Whether frames can be timed from the library's "assembled" stamp to the GPU finishing
+    bool clientTiming() const { return m_Enabled && m_ClientTiming; }
 
-    // Starts timing the frame that uses this slot, if it is one of the sampled frames
-    bool begin(int slot)
+    // Starts timing the frame that uses this slot, if it is one of the sampled frames.
+    // enqueueUs is when the frame was assembled, on CLOCK_MONOTONIC in microseconds.
+    bool begin(int slot, uint64_t enqueueUs)
     {
         if (!m_Enabled || ++m_Counter % kSampleEvery != 0) {
             return false;
@@ -281,6 +288,7 @@ public:
         }
         s.pending = true;
         s.valid = true;
+        s.enqueueUs = enqueueUs;
         stamp(slot, 0);
         return true;
     }
@@ -302,11 +310,17 @@ public:
     uint64_t decodeUs() const { return m_DecodeUs; }
     uint64_t convertUs() const { return m_ConvertUs; }
     uint64_t samples() const { return m_Samples; }
+    // Assembled to GPU done, summed over the frames that could be placed on the clock
+    uint64_t clientSumUs() const { return m_ClientSumUs; }
+    uint64_t clientSamples() const { return m_ClientSamples; }
+    // The largest since the previous call
+    uint32_t takeClientMaxUs() const { return m_ClientMaxUs.exchange(0); }
 
 private:
     struct Slot {
         bool pending = false;
         bool valid = false;
+        uint64_t enqueueUs = 0;
     };
 
     void stamp(int slot, int which)
@@ -341,6 +355,23 @@ private:
             m_DecodeUs += uint64_t(double((data[2] - data[0]) & m_Mask) * toUs);
             m_ConvertUs += uint64_t(double((data[4] - data[2]) & m_Mask) * toUs);
             m_Samples++;
+
+            // Place "colour conversion done" on CLOCK_MONOTONIC: read both clocks now and
+            // step back by how long ago the GPU wrote that timestamp
+            uint64_t ticksNow = 0, monotonicNowNs = 0;
+            if (m_ClientTiming && m_Vulkan->calibrate(ticksNow, monotonicNowNs)) {
+                const double agoNs = double((ticksNow - data[4]) & m_Mask) * m_PeriodNs;
+                const double doneUs = (double(monotonicNowNs) - agoNs) / 1000.0;
+                const double clientUs = doneUs - double(m_Slots[slot].enqueueUs);
+                // Anything outside this is a stale or mismatched stamp, not a latency
+                if (agoNs < 1e9 && clientUs > 0.0 && clientUs < 1e6) {
+                    m_ClientSumUs += uint64_t(clientUs);
+                    m_ClientSamples++;
+                    uint32_t peak = m_ClientMaxUs.load(std::memory_order_relaxed);
+                    while (uint32_t(clientUs) > peak && !m_ClientMaxUs.compare_exchange_weak(peak, uint32_t(clientUs))) {
+                    }
+                }
+            }
         }
         vkResetQueryPool(device, m_Pool, uint32_t(slot * kStamps), kStamps);
         m_Slots[slot].pending = false;
@@ -355,7 +386,10 @@ private:
     double m_PeriodNs = 0.0;
     uint32_t m_Counter = 0;
     bool m_Enabled = false;
+    bool m_ClientTiming = false;
     std::atomic<uint64_t> m_DecodeUs { 0 }, m_ConvertUs { 0 }, m_Samples { 0 };
+    std::atomic<uint64_t> m_ClientSumUs { 0 }, m_ClientSamples { 0 };
+    mutable std::atomic<uint32_t> m_ClientMaxUs { 0 };
 };
 
 // Enough for the decode of one frame to overlap the render of the previous
@@ -371,6 +405,9 @@ struct Frame {
     int colorspace = COLORSPACE_REC_709;
     int frameNumber = 0;
     bool hdr = false; // HDR10: PQ-encoded, normally BT.2020
+    // When moonlight-common-c finished assembling the frame, on CLOCK_MONOTONIC in
+    // microseconds. The library's stamp has 1 ms resolution, so add the average rounding.
+    uint64_t enqueueUs = 0;
 };
 
 class Renderer {
@@ -435,6 +472,7 @@ private:
     std::atomic<uint64_t> m_ReceivedBytes { 0 };
     std::atomic<uint64_t> m_PacketsTotal { 0 }, m_PacketsLost { 0 };
     std::atomic<uint64_t> m_ArrivalCount { 0 }, m_ArrivalSumUs { 0 }, m_ArrivalSqSumUs { 0 };
+    std::atomic<uint64_t> m_AssemblySumMs { 0 }; // first to last packet of each frame
     uint64_t m_LastArrivalUs = 0; // submitting thread only
     // Peaks since the last stats read
     mutable std::atomic<uint32_t> m_MaxArrivalGapUs { 0 }, m_MaxFrameUs { 0 };
@@ -645,6 +683,11 @@ int Renderer::submit(PDECODE_UNIT du)
     frame.colorspace = du->colorspace;
     frame.frameNumber = du->frameNumber;
     frame.hdr = du->hdrActive;
+    frame.enqueueUs = du->enqueueTimeMs * 1000 + 500;
+    // First packet to last packet: how long the frame took to arrive
+    if (du->enqueueTimeMs >= du->receiveTimeMs) {
+        m_AssemblySumMs += du->enqueueTimeMs - du->receiveTimeMs;
+    }
 
     {
         std::lock_guard<std::mutex> guard(m_FrameLock);
@@ -701,7 +744,7 @@ void Renderer::process(const Frame& frame)
     // The slot of the frames in flight this frame will use, as present() picks it. One frame
     // in a few has its GPU stages timed: begin() writes the first timestamp.
     const int slot = int(m_FrameIndex % k_FramesInFlight);
-    const bool timed = m_GpuTimer.begin(slot);
+    const bool timed = m_GpuTimer.begin(slot, frame.enqueueUs);
 
     const uint64_t start = nowUs();
     const int surface = m_NextSurface;
@@ -910,6 +953,12 @@ void Renderer::stats(PW_RENDERER_STATS* out) const
     out->gpuDecodeUs = m_GpuTimer.decodeUs();
     out->gpuConvertUs = m_GpuTimer.convertUs();
     out->gpuSamples = m_GpuTimer.samples();
+
+    out->assemblySumMs = m_AssemblySumMs;
+    out->clientTiming = m_GpuTimer.clientTiming();
+    out->clientSumUs = m_GpuTimer.clientSumUs();
+    out->clientSamples = m_GpuTimer.clientSamples();
+    out->clientMaxUs = m_GpuTimer.takeClientMaxUs();
 }
 
 // Serializes the API entry points; the renderer exists between setup and cleanup

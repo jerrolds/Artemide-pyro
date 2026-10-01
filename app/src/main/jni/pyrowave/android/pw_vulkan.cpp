@@ -149,6 +149,16 @@ bool PwVulkan::create(bool withSurface, std::string& error)
         }
     }
 
+    // Optional, and independent of the surface: places GPU timestamps on CLOCK_MONOTONIC
+    if (hasExtension(deviceExtensions, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+        m_DeviceExtensions.push_back(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        m_Calibrated = 1;
+    }
+    else if (hasExtension(deviceExtensions, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)) {
+        m_DeviceExtensions.push_back(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+        m_Calibrated = 2;
+    }
+
     m_QueueInfo.queueFamilyIndex = m_QueueFamily;
     m_QueueInfo.queueCount = 1;
     m_QueueInfo.pQueuePriorities = &m_QueuePriority;
@@ -166,6 +176,30 @@ bool PwVulkan::create(bool withSurface, std::string& error)
     }
     volkLoadDevice(m_Device);
     vkGetDeviceQueue(m_Device, m_QueueFamily, 0, &m_Queue);
+    return true;
+}
+
+bool PwVulkan::calibrate(uint64_t& deviceTicks, uint64_t& monotonicNs) const
+{
+    if (m_Calibrated == 0) {
+        return false;
+    }
+    // The EXT entry points take the KHR info struct (the types are aliases)
+    VkCalibratedTimestampInfoKHR infos[2] = {};
+    infos[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+    infos[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+    infos[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+    infos[1].timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
+    uint64_t values[2] = {};
+    uint64_t deviation = 0;
+    const VkResult result = m_Calibrated == 1 ?
+            vkGetCalibratedTimestampsKHR(m_Device, 2, infos, values, &deviation) :
+            vkGetCalibratedTimestampsEXT(m_Device, 2, infos, values, &deviation);
+    if (result != VK_SUCCESS) {
+        return false;
+    }
+    deviceTicks = values[0];
+    monotonicNs = values[1];
     return true;
 }
 

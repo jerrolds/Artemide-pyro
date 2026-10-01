@@ -52,7 +52,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveCleanup(JNIEnv* env, jclass c
     PwRendererCleanup();
 }
 
-// Fills stats (length >= 32) in the order of MoonBridge.PYROWAVE_STAT_*
+// Fills stats (length >= 37) in the order of MoonBridge.PYROWAVE_STAT_*
 JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetStats(JNIEnv* env, jclass clazz, jlongArray stats) {
     PW_RENDERER_STATS s;
@@ -67,6 +67,8 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetStats(JNIEnv* env, jclass 
         s.maxArrivalGapUs, s.maxFrameUs, s.colorspace, s.swapchainFormat, s.swapchainImages,
         s.hintKind, s.framesInFlight, s.surfaceCount, s.gpuTimingEnabled ? 1 : 0,
         (jlong)s.gpuDecodeUs, (jlong)s.gpuConvertUs, (jlong)s.gpuSamples,
+        (jlong)s.assemblySumMs, s.clientTiming ? 1 : 0, (jlong)s.clientSumUs, (jlong)s.clientSamples,
+        s.clientMaxUs,
     };
     const jsize count = sizeof(values) / sizeof(values[0]);
     if (env->GetArrayLength(stats) >= count) {

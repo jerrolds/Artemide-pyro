@@ -71,7 +71,12 @@ public class MoonBridge {
     public static final int PYROWAVE_STAT_GPU_DECODE_US = 29;
     public static final int PYROWAVE_STAT_GPU_CONVERT_US = 30;
     public static final int PYROWAVE_STAT_GPU_SAMPLES = 31;
-    public static final int PYROWAVE_STAT_COUNT = 32;
+    public static final int PYROWAVE_STAT_ASSEMBLY_SUM_MS = 32; // first to last packet, summed over frames
+    public static final int PYROWAVE_STAT_CLIENT_TIMING = 33; // the GPU clock is on CLOCK_MONOTONIC
+    public static final int PYROWAVE_STAT_CLIENT_SUM_US = 34; // frame assembled -> GPU done
+    public static final int PYROWAVE_STAT_CLIENT_SAMPLES = 35;
+    public static final int PYROWAVE_STAT_CLIENT_MAX_US = 36; // peak since the last read
+    public static final int PYROWAVE_STAT_COUNT = 37;
 
     public static final int BUFFER_TYPE_PICDATA = 0;
     public static final int BUFFER_TYPE_SPS = 1;
