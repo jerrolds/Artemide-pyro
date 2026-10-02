@@ -577,6 +577,10 @@ public class PreferenceConfiguration {
     // PyroWave spends a fixed budget per pixel: 1.6 bits per pixel is the codec
     // author's visually clean point for 4:2:0 (200 Mbps at 1080p60). Capped to
     // what a gigabit link carries after FEC and audio, as moonlight-qt does.
+    // PyroWave's default is sized for a wired gigabit link. On Wi-Fi it overruns the link: at the
+    // formula's 900 Mbps a Tab S9 Ultra lost ~20,000 packets a second, while ~120-250 Mbps was clean.
+    public static final int PYROWAVE_WIFI_DEFAULT_KBPS = 120000;
+
     public static int getDefaultPyroWaveBitrate(int width, int height, float fps) {
         double kbps = (double) width * height * fps * 1.6 / 1000.0;
         kbps = Math.max(20000.0, Math.min(900000.0, kbps));

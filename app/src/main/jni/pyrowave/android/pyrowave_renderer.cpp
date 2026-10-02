@@ -9,6 +9,7 @@
 #include <android/native_window.h>
 
 #include <dlfcn.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -393,10 +394,11 @@ private:
 };
 
 // Enough for the decode of one frame to overlap the render of the previous
-// one while a third waits for the display. A deeper queue keeps the GPU busy
-// across the CPU's per-frame work, so mobile clock governors see a full load.
-constexpr int k_SurfaceCount = 4;
-constexpr int k_FramesInFlight = 3;
+// one while a third waits for the display. Each extra frame in flight is a frame
+// of latency once the GPU is the bottleneck, and 3 deep did not raise the GPU
+// clock (measured), so the queue is kept shallow.
+constexpr int k_SurfaceCount = 3;
+constexpr int k_FramesInFlight = 2;
 
 struct Frame {
     std::vector<uint8_t> data;
@@ -423,6 +425,7 @@ public:
 
 private:
     void renderLoop();
+    void waitForFreeSlot();
     void process(const Frame& frame);
     bool present(int surface, uint64_t decodeValue, int colorspace);
     void waitIdle();
@@ -710,7 +713,17 @@ void Renderer::renderLoop()
     // so a frame that only just fits still asks the system for a faster GPU clock
     m_PerfHint.start(7500000);
     m_HintKind = m_PerfHint.kind();
+
+    // Same boost the MediaCodec renderer thread gets (THREAD_PRIORITY_URGENT_DISPLAY)
+    if (setpriority(PRIO_PROCESS, 0, -8) != 0) {
+        pwLog(ANDROID_LOG_INFO, "Render thread priority boost was refused");
+    }
+
     for (;;) {
+        // Wait for the GPU to have room before taking a frame, so the frame taken is the
+        // newest one: frames arriving during the wait replace the pending one instead of
+        // queueing behind a stale one
+        waitForFreeSlot();
         {
             std::unique_lock<std::mutex> lock(m_FrameLock);
             m_FrameReady.wait(lock, [this]() { return m_Stopping || m_PendingValid; });
@@ -725,6 +738,20 @@ void Renderer::renderLoop()
         std::lock_guard<std::mutex> guard(m_RenderLock);
         process(m_Working);
     }
+}
+
+// Blocks until the submission that last used the next frame slot has finished on the GPU
+void Renderer::waitForFreeSlot()
+{
+    const uint32_t slot = m_FrameIndex % k_FramesInFlight;
+    if (m_RenderTimeline == VK_NULL_HANDLE || m_FrameValues[slot] == 0) {
+        return;
+    }
+    VkSemaphoreWaitInfo waitInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &m_RenderTimeline;
+    waitInfo.pValues = &m_FrameValues[slot];
+    vkWaitSemaphores(m_Vulkan.device(), &waitInfo, UINT64_MAX);
 }
 
 void Renderer::process(const Frame& frame)

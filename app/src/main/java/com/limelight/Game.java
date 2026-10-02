@@ -728,8 +728,19 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 }
                 if (prefConfig.bitrateIsDefault) {
                     nonPyroWaveBitrate = streamBitrate;
-                    streamBitrate = PreferenceConfiguration.getDefaultPyroWaveBitrate(
+                    int pyroWaveBitrate = PreferenceConfiguration.getDefaultPyroWaveBitrate(
                             prefConfig.width, prefConfig.height, prefConfig.fps);
+                    final boolean wifi = isOnWifi();
+                    if (wifi) {
+                        pyroWaveBitrate = Math.min(pyroWaveBitrate, PreferenceConfiguration.PYROWAVE_WIFI_DEFAULT_KBPS);
+                    }
+                    streamBitrate = pyroWaveBitrate;
+                    LimeLog.info("PyroWave default bitrate: " + (pyroWaveBitrate / 1000) + " Mbps" +
+                            (wifi ? " (Wi-Fi)" : " (not on Wi-Fi)"));
+                    // The slider shows the ordinary default, not what PyroWave really uses
+                    Toast.makeText(this, "PyroWave bitrate: " + (pyroWaveBitrate / 1000) + " Mbps" +
+                            (wifi ? " (Wi-Fi default)" : " (default)") +
+                            ". Set a bitrate in settings to change it.", Toast.LENGTH_LONG).show();
                 }
             }
             else {
@@ -3844,11 +3855,32 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             holder.getSurface().setFrameRate(desiredFrameRate,
                     Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+        }
 
-            // Hint the SoC to keep sustained clocks for smoother video decode/composition
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                try { getWindow().setSustainedPerformanceMode(true); } catch (Throwable ignored) {}
-            }
+        // Hint the SoC to keep sustained clocks for smoother video decode/composition. This used to
+        // sit inside the Android 11 branch above, so it never ran on Android 12 and later.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+                boolean supported = pm != null && pm.isSustainedPerformanceModeSupported();
+                LimeLog.info("Sustained performance mode: " + (supported ? "supported, enabling" : "not supported by this device"));
+                if (supported) {
+                    getWindow().setSustainedPerformanceMode(true);
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    // Whether the active network is Wi-Fi. A wired adapter reports Ethernet, so it is not capped.
+    private boolean isOnWifi() {
+        try {
+            android.net.ConnectivityManager cm =
+                    (android.net.ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            android.net.Network network = cm != null ? cm.getActiveNetwork() : null;
+            android.net.NetworkCapabilities caps = network != null ? cm.getNetworkCapabilities(network) : null;
+            return caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI);
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
