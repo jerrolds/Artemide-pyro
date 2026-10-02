@@ -7,10 +7,16 @@ disconnected for the last stretch of work and three features have never run.
 Read `docs/PYROWAVE_DECODE_PATH.md` first for the design (how the native renderer
 maps onto Moonlight-Qt's). This file covers what happened after it.
 
+> **Update (second session): read section 10 first.** The active branch is now
+> `sync/derflacco-async` (rebased onto derflacco's async lineage), the app is called
+> PyroArt, and a batch of latency options was added that has **not been run on a device**.
+> Sections 1-9 describe the earlier state and remain accurate for what they measured.
+
 ## 1. Status in one screen
 
 - PyroWave streaming works end to end on a Galaxy Tab S9 Ultra against a Windows
-  host. Branch `ccr-ea2408c2-mx41mg`, pushed, working tree clean at `39f43a6f`.
+  host. Branch `ccr-ea2408c2-mx41mg`, pushed, working tree clean at `39f43a6f`
+  (later: `695c576d`, see section 10).
 - **Stutter was Wi-Fi loss from far too high a bitrate**, not the tablet. Fixed by
   setting a bitrate of about 100 Mbps (verified, section 5.1).
 - **The remaining limit is the Adreno GPU clock**: fps tracks the clock almost step
@@ -207,6 +213,59 @@ Keep all three in step.
    3 frames in flight costs latency; a 4:4:4 setting if wanted.
 7. Test the same APK on the Poco F6 Pro (set battery to No restrictions) and Tab S8 Ultra (slower
    Adreno 730; needs a Vulkan 1.3 driver, Android 13+ for the hint API).
+
+## 10. Second session: sync branch, PyroArt, latency options
+
+### 10.1 Branches and commits
+- **`sync/derflacco-async`** (pushed to `origin`, tip `c3b4a6f6`) = derflacco/Artemide_Experimental_Async
+  (`6648fe1b`, the "Experimental_Async_0.4" July build the user had working) with our 9 PyroWave
+  commits replayed on top, plus `c3b4a6f6`. Reason: the old base hung the HEVC decoder (black
+  screen). Eight small PyroWave hooks were re-applied in `MediaCodecDecoderRenderer.java`.
+  Never push to the `derflacco` remote.
+- **`ccr-ea2408c2-mx41mg`** (tip `695c576d`) is the old line. Its last commit holds a Wi-Fi default
+  bitrate cap (120 Mbps), `appCategory="game"`, performance game mode, and the fix that moves
+  `setSustainedPerformanceMode` out of the Android 11 branch. Those three are **not** on the sync
+  branch; cherry-pick them if wanted. The rest of that commit is superseded.
+- Build in a short worktree (e.g. `C:\w\s`) because of the Windows path limit.
+
+### 10.2 What was added (all on the sync branch, all compiled, **none run on the device**)
+| Feature | Setting (PyroWave section) | Notes |
+|---|---|---|
+| App renamed PyroArt (release label) | n/a | package stays `com.limelight.noir` |
+| PyroWave-only bitrate slider, up to 2000 Mbps | PyroWave bitrate | fixes the trap where the shared 78 Mbps default became about 900 Mbps; key `seekbar_pyrowave_bitrate_kbps` |
+| Codec Automatic behaves like vanilla; PyroWave is opt-in | codec choice | `NvConnection` adds PyroWave HDR bits only when PyroWave is requested |
+| Keep-warm re-decodes to hold the Adreno clock | keep GPU clock high | one earlier test: re-decodes fell 17 to 5 per second and the clock stayed 295 MHz; inconclusive |
+| Just-in-time pacing | low-latency pacing | v1 cost 10-25 fps; now conservative (`k_JitMarginUs` 1500, `k_JitGpuScale` 0.92); unverified |
+| Parse on arrival (`PwDecoder::prepare()` + `submit()` split, helper thread) | parse on arrival | overlaps CPU parse with the previous GPU decode |
+| High global queue priority, ADPF tuned (4 ms target) | none | falls back if `VK_KHR_global_priority` is refused |
+| Match display refresh | match refresh | asks the host for the panel rate and keeps the top display mode |
+| Detailed overlay | show detailed overlay (default on) | HEVC-style lines first, original PyroWave metrics under `-- PyroWave detail --` |
+| Library per-stage GPU timings | none | logged every 10 s as `Decoder stage:` |
+
+Native release flags (ThinLTO, -O3) are in `Application.mk` under `APP_PYRO_OPT`, switched on by
+`app/build.gradle` for release. Non-arm64 ABIs need the no-op stubs in `pyrowave_renderer_stub.c`
+(add one there whenever a new `PwRenderer*` function is added).
+
+### 10.3 Latency picture (measured, 295 MHz, unpaced)
+Client delay is about 18 ms: CPU about 2, queue wait about 7.6, GPU decode about 6.7, convert about
+1.5. HEVC delay is about 3.4 ms. With 6 ms network assumed for both, the honest PyroWave estimate
+was about 26 ms against about 13 ms for HEVC. PyroWave looks better only at 300+ Mbps (text is blurry
+below that); at normal bitrates HEVC/AV1 give better quality per bit.
+
+### 10.4 Next steps
+1. Reconnect the tablet (new Wireless debugging IP:port), install `PyroArt-release.apk`
+   (`app\build\outputs\apk\...\release\`, sign per section 4), and test **each option on its own**:
+   pacing, keep-warm, parse on arrival, match refresh. Record fps, clock, Delay and the `Decoder stage:`
+   log against the baseline above.
+2. Re-measure release-build CPU time (earlier about 1.7-2.0 ms).
+3. If the best case stays well above HEVC's total, position PyroWave as "better image, slightly more
+   latency" in the settings text and README.
+4. Optional: benchmark MoreOrLessSoftware `moonlight-X` v0.5.2 (ideas taken from it: present
+   scheduler, host-timestamp sync, refresh matching, lost-block sideband, stage timing); lost-block
+   sideband to the decoder and vsync-aware pacing are not implemented.
+5. Gotchas met: Gradle needs `-Pandroid.injected.build.abi=arm64-v8a` quoted in PowerShell; strings.xml
+   apostrophes must be escaped (`\'`); if the debug key changes, uninstalling `com.limelight.noir`
+   is required.
 
 ## 9. Working with this user
 
