@@ -53,6 +53,19 @@ public:
                 const std::vector<PyroWaveFraming::Segment>& packets, size_t criticalPackets,
                 int surface, VkSemaphore waitSemaphore, uint64_t waitValue, uint64_t& decodeValue);
 
+    // decode() in its two halves, so that the CPU half of the next frame can run while the GPU is still
+    // decoding the previous one. prepare() parses the framing and pushes the packets into the library
+    // decoder's CPU-side buffers; submit() records the GPU work, which copies those buffers, so a new
+    // prepare() may start as soon as submit() has returned. Only one frame is prepared at a time: a
+    // second prepare() replaces the first. Neither may run concurrently with the other or with decode().
+    bool prepare(const uint8_t* data, size_t size,
+                 const std::vector<PyroWaveFraming::Segment>& packets, size_t criticalPackets);
+    bool submit(int surface, VkSemaphore waitSemaphore, uint64_t waitValue, uint64_t& decodeValue);
+
+    // The library's own per-stage GPU timings (a debugging aid): one callback per line, then the
+    // counters restart. Call from the thread that submits, not while prepare() runs.
+    void reportStages(void (*callback)(void* userdata, const char* message));
+
     VkSemaphore decodeSemaphore() const { return m_DecodeSemaphore; }
     const Surface& surface(int index) const { return m_Surfaces[index]; }
     int surfaceCount() const { return int(m_Surfaces.size()); }

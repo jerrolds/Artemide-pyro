@@ -68,6 +68,9 @@ public class PyroWaveRenderer {
         LimeLog.info("PyroWave: " + width + "x" + height + "@" + frameRate +
                 (fullRange ? " full range" : " limited range") + (tenBit ? ", 10-bit HDR10" : ", 8-bit") +
                 ", " + MoonBridge.getPyroWaveStatus());
+        MoonBridge.pyroWaveSetKeepWarm(prefs.pyroWaveKeepWarm, Math.round(1000f / displayPeriodMs));
+        MoonBridge.pyroWaveSetPacing(prefs.pyroWaveJitPacing);
+        MoonBridge.pyroWaveSetPreParse(prefs.pyroWavePreParse);
         return MoonBridge.pyroWaveSetup(videoFormat, width, height, frameRate, fullRange);
     }
 
@@ -158,8 +161,11 @@ public class PyroWaveRenderer {
         if (TrafficStatsHelper.getPackageRxBytes(Process.myUid()) != TrafficStats.UNSUPPORTED) {
             long netBytes = TrafficStatsHelper.getPackageRxBytes(Process.myUid()) + TrafficStatsHelper.getPackageTxBytes(Process.myUid());
             if (lastNetBytes != 0) {
-                double mbps = (netBytes - lastNetBytes) * 8 / seconds / 1e6;
-                bandwidth = String.format(Locale.ROOT, "%.1f Mbps", mbps);
+                // Formatted like the HEVC/AV1 overlay: K/s below 1000, M/s above
+                float kbPerSecond = (float) ((netBytes - lastNetBytes) / 1024.0 / seconds);
+                bandwidth = kbPerSecond >= 1000
+                        ? String.format(Locale.ROOT, "%.2fM/s", kbPerSecond / 1024f)
+                        : String.format(Locale.ROOT, "%.2fK/s", kbPerSecond);
             }
             lastNetBytes = netBytes;
         }
@@ -234,34 +240,30 @@ public class PyroWaveRenderer {
             }
         }
         else {
+            // The block the HEVC/AV1 overlay shows, in the same order and wording, so the codecs can be
+            // read side by side. Everything else about the stream goes to the performance log.
             sb.append(context.getString(R.string.perf_overlay_streamdetails, width + "x" + height, presentedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_decoder, "PyroWave (Vulkan, " + path + " path)")).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_format, format)).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_gpu, MoonBridge.getPyroWaveStatus())).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_output,
-                    cur[MoonBridge.PYROWAVE_STAT_OUTPUT_WIDTH] + "x" + cur[MoonBridge.PYROWAVE_STAT_OUTPUT_HEIGHT], mode)).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_pipeline,
-                    (int) cur[MoonBridge.PYROWAVE_STAT_FRAMES_IN_FLIGHT], (int) cur[MoonBridge.PYROWAVE_STAT_SURFACES],
-                    (int) cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_IMAGES],
-                    swapchainFormatName(cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_FORMAT]), hint)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_incomingfps, receivedFps)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_renderingfps, presentedFps)).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_frames, replaced, rejected, partial)).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_videodata, kbPerFrame, videoMbps, bitsPerPixel)).append('\n');
+            // Frames the host sent that could not be decoded at all
+            float droppedPercent = received > 0 ? 100f * rejected / received : 0f;
+            sb.append(context.getString(R.string.perf_overlay_netdrops, droppedPercent)).append('\n');
             if (bandwidth != null) {
                 sb.append(context.getString(R.string.perf_overlay_lite_bandwidth)).append(": ").append(bandwidth).append('\n');
             }
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_packets, packets, lostPackets, lossPercent)).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_arrival, gapAvgMs, jitterMs, worstGapMs)).append('\n');
             sb.append(context.getString(R.string.perf_overlay_netlatency, (int) (rttInfo >> 32), (int) rttInfo)).append('\n');
             if (hostFrames > 0 && host[2] != 0xFFFFFFFFL) {
                 sb.append(context.getString(R.string.perf_overlay_hostprocessinglatency,
                         host[2] / 10f, host[3] / 10f, hostAvg / 10f)).append('\n');
             }
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_cputime, decodeMs, presentMs)).append('\n');
-            sb.append(context.getString(R.string.perf_overlay_pyrowave_worstframe, worstFrameMs)).append('\n');
+            // Average decoding time is the GPU decode stage; Delay runs from the frame being assembled
+            // to the GPU finishing it (the HEVC/AV1 figure ends when the frame is released to the display)
             if (gpuTiming && gpuSamples > 0) {
-                sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime, gpuDecodeMs, gpuConvertMs, gpuSamples));
+                sb.append(context.getString(R.string.perf_overlay_dectime, gpuDecodeMs));
+                if (clientTiming && clientSamples > 0) {
+                    sb.append(context.getString(R.string.perf_overlay_lite_e2e, clientAvgMs));
+                }
             }
             else if (gpuTiming) {
                 sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime_waiting));
@@ -269,17 +271,46 @@ public class PyroWaveRenderer {
             else {
                 sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime_unavailable));
             }
-            sb.append('\n');
-            if (clientTiming && clientSamples > 0) {
-                sb.append(context.getString(R.string.perf_overlay_pyrowave_client, clientAvgMs, clientMaxMs)).append('\n');
-                sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e,
-                        endToEndMs, hostMs, networkMs, assemblyMs, clientAvgMs, displayMs));
+
+            // What only PyroWave has: its format and size, the GPU split, and the frames it had to skip
+            sb.append('\n').append(context.getString(R.string.perf_overlay_pyrowave_summary, format, bitsPerPixel, kbPerFrame)).append('\n');
+            if (gpuTiming && gpuSamples > 0) {
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_gputime, gpuDecodeMs, gpuConvertMs, gpuSamples)).append('\n');
             }
-            else if (clientTiming) {
-                sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e_waiting));
+            sb.append(context.getString(R.string.perf_overlay_pyrowave_frames, replaced, rejected, partial));
+            if (prefs.pyroWaveKeepWarm) {
+                float warmPerSecond = (float) ((cur[MoonBridge.PYROWAVE_STAT_WARM_FRAMES] - prev[MoonBridge.PYROWAVE_STAT_WARM_FRAMES]) / seconds);
+                sb.append('\n').append(context.getString(R.string.perf_overlay_pyrowave_warm, warmPerSecond));
             }
-            else {
-                sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e_unavailable));
+
+            // The original PyroWave detail, for comparing with the block above: what the stream is, how the
+            // pipeline is set up, where the time goes on the CPU and GPU, and the estimated total
+            if (prefs.pyroWaveDetailedOverlay) {
+                sb.append('\n').append(context.getString(R.string.perf_overlay_pyrowave_detail_header)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_format, format)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_gpu, MoonBridge.getPyroWaveStatus())).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_output,
+                        cur[MoonBridge.PYROWAVE_STAT_OUTPUT_WIDTH] + "x" + cur[MoonBridge.PYROWAVE_STAT_OUTPUT_HEIGHT], mode)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_pipeline,
+                        (int) cur[MoonBridge.PYROWAVE_STAT_FRAMES_IN_FLIGHT], (int) cur[MoonBridge.PYROWAVE_STAT_SURFACES],
+                        (int) cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_IMAGES],
+                        swapchainFormatName(cur[MoonBridge.PYROWAVE_STAT_SWAPCHAIN_FORMAT]), hint)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_videodata, kbPerFrame, videoMbps, bitsPerPixel)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_packets, packets, lostPackets, lossPercent)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_arrival, gapAvgMs, jitterMs, worstGapMs)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_cputime, decodeMs, presentMs)).append('\n');
+                sb.append(context.getString(R.string.perf_overlay_pyrowave_worstframe, worstFrameMs)).append('\n');
+                if (clientTiming && clientSamples > 0) {
+                    sb.append(context.getString(R.string.perf_overlay_pyrowave_client, clientAvgMs, clientMaxMs)).append('\n');
+                    sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e,
+                            endToEndMs, hostMs, networkMs, assemblyMs, clientAvgMs, displayMs));
+                }
+                else if (clientTiming) {
+                    sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e_waiting));
+                }
+                else {
+                    sb.append(context.getString(R.string.perf_overlay_pyrowave_e2e_unavailable));
+                }
             }
         }
 

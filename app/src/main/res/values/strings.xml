@@ -135,6 +135,21 @@
     <string name="perf_overlay_dectime">Average decoding time: %1$.2f ms</string>
     <string name="perf_overlay_drawdelay"> Delay: %1$.2f ms</string>
     <string name="perf_overlay_e2etime">\nEnd-to-end: %.1fms</string>
+    <string name="title_seekbar_pyrowave_bitrate">PyroWave bitrate</string>
+    <string name="summary_seekbar_pyrowave_bitrate">Used only when the video codec is PyroWave. PyroWave frames are coded one at a time, so it needs far more than other codecs: about 100-300 Mbps works on a good Wi-Fi link, wired links can go much higher.</string>
+    <string name="title_checkbox_pyrowave_keep_warm">PyroWave: keep GPU clock high</string>
+    <string name="summary_checkbox_pyrowave_keep_warm">While the host sends fewer frames than the screen refreshes, decode the last frame again so the GPU never looks idle. This stops the phone dropping its GPU clock and losing frames afterwards, but uses more power. Only used with PyroWave.</string>
+    <string name="title_checkbox_pyrowave_jit_pacing">PyroWave: low-latency frame pacing (experimental)</string>
+    <string name="summary_checkbox_pyrowave_jit_pacing">When the GPU is the bottleneck, wait to take each frame until the GPU is about to be free instead of queueing it behind the frame being decoded. Lowers latency; may cost a few frames per second if the timing estimate is off. Only used with PyroWave.</string>
+    <string name="title_checkbox_pyrowave_preparse">PyroWave: parse frames on arrival (experimental)</string>
+    <string name="summary_checkbox_pyrowave_preparse">Parse each frame on a helper thread as soon as it arrives, while the GPU is still decoding the previous one, so that the render thread only has to submit it. Saves about 2 ms of latency; uses a little more CPU. Works best together with low-latency frame pacing. Only used with PyroWave.</string>
+    <string name="title_checkbox_pyrowave_match_refresh">PyroWave: match the display\'s refresh rate</string>
+    <string name="summary_checkbox_pyrowave_match_refresh">Ask the host for exactly the screen\'s refresh rate (for example 120 fps) instead of the FPS setting. The host then stops sending frames the screen can never show, which saves bandwidth and host load and keeps the game in step with the display. Leave it off if you want the host to send as many frames as it can so the newest one is always fresh. Only used with PyroWave.</string>
+    <string name="title_checkbox_pyrowave_detailed_overlay">PyroWave: show detailed overlay lines</string>
+    <string name="summary_checkbox_pyrowave_detailed_overlay">Under the lines shared with the HEVC and AV1 overlay, also show the original PyroWave detail: stream format, pipeline settings, packets, arrival jitter, CPU and GPU time, worst frame and the estimated total latency. Only used with PyroWave.</string>
+    <string name="perf_overlay_pyrowave_detail_header">-- PyroWave detail --</string>
+    <string name="perf_overlay_pyrowave_warm">GPU keep-warm: %1$.0f re-decodes per second</string>
+    <string name="perf_overlay_pyrowave_summary">PyroWave: %1$s, %2$.2f bits/pixel, %3$.0f KB/frame</string>
     <string name="perf_overlay_pyrowave_output">Output: %1$s, %2$s</string>
     <string name="perf_overlay_pyrowave_frames">Frames dropped: %1$d superseded, %2$d undecodable, %3$d partial</string>
     <string name="perf_overlay_pyrowave_cputime">CPU time per frame: %1$.2f ms decode, %2$.2f ms present</string>
@@ -152,7 +167,7 @@
     <string name="perf_overlay_pyrowave_client">Client latency (frame assembled to GPU done): %1$.1f ms average, %2$.1f ms worst</string>
     <string name="perf_overlay_pyrowave_e2e">End-to-end, host to screen (estimated): %1$.1f ms = host %2$.1f + network %3$.1f + receive %4$.1f + client %5$.1f + display %6$.1f</string>
     <string name="perf_overlay_pyrowave_e2e_waiting">End-to-end: waiting for the first timed frame</string>
-    <string name="perf_overlay_pyrowave_e2e_unavailable">End-to-end: not available (this device cannot place GPU timestamps on the system clock)</string>
+    <string name="perf_overlay_pyrowave_e2e_unavailable">End-to-end: not available</string>
 
     <!-- Performance Report Sharing -->
     <string name="email_prefix_message">

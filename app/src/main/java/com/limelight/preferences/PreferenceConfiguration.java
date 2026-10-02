@@ -105,6 +105,24 @@ public class PreferenceConfiguration {
     static final String RESOLUTION_PREF_STRING = "list_resolution";
     static final String FPS_PREF_STRING = "list_fps";
     static final String BITRATE_PREF_STRING = "seekbar_bitrate_kbps";
+    // Bitrate used only with the PyroWave codec, which needs far more than the others (kbps)
+    static final String PYROWAVE_BITRATE_PREF_STRING = "seekbar_pyrowave_bitrate_kbps";
+    public static final int DEFAULT_PYROWAVE_BITRATE = 120000;
+    // Keep the GPU busy while the host sends few frames, so the clock governor does not step down
+    private static final String PYROWAVE_KEEP_WARM_PREF_STRING = "checkbox_pyrowave_keep_warm";
+    private static final boolean DEFAULT_PYROWAVE_KEEP_WARM = false;
+    // Experimental: take each frame just in time for the GPU (lower latency when the GPU is the bottleneck)
+    private static final String PYROWAVE_JIT_PACING_PREF_STRING = "checkbox_pyrowave_jit_pacing";
+    private static final boolean DEFAULT_PYROWAVE_JIT_PACING = false;
+    // Experimental: parse frames on a helper thread as they arrive
+    private static final String PYROWAVE_PREPARSE_PREF_STRING = "checkbox_pyrowave_preparse";
+    private static final boolean DEFAULT_PYROWAVE_PREPARSE = false;
+    // Ask the host for exactly the display's refresh rate instead of the FPS setting (PyroWave only)
+    private static final String PYROWAVE_MATCH_REFRESH_PREF_STRING = "checkbox_pyrowave_match_refresh";
+    private static final boolean DEFAULT_PYROWAVE_MATCH_REFRESH = false;
+    // Show the original PyroWave detail lines under the HEVC-style block of the overlay
+    private static final String PYROWAVE_DETAILED_OVERLAY_PREF_STRING = "checkbox_pyrowave_detailed_overlay";
+    private static final boolean DEFAULT_PYROWAVE_DETAILED_OVERLAY = true;
     private static final String BITRATE_PREF_OLD_STRING = "seekbar_bitrate";
     private static final String METERED_BITRATE_PREF_STRING = "seekbar_metered_bitrate_kbps";
     private static final String ENABLE_ULTRA_LOW_LATENCY_PREF_STRING = "checkbox_ultra_low_latency";
@@ -323,6 +341,12 @@ public class PreferenceConfiguration {
     public int width, height, bitrate;
     // The bitrate was not set by the user (so a PyroWave default may replace it)
     public boolean bitrateIsDefault;
+    public int pyroWaveBitrate;
+    public boolean pyroWaveKeepWarm;
+    public boolean pyroWaveJitPacing;
+    public boolean pyroWavePreParse;
+    public boolean pyroWaveMatchRefresh;
+    public boolean pyroWaveDetailedOverlay;
     public float fps;
 //    public String customBitrate;
     public boolean enableUltraLowLatency;
@@ -687,12 +711,6 @@ public class PreferenceConfiguration {
     // PyroWave spends a fixed budget per pixel: 1.6 bits per pixel is the codec
     // author's visually clean point for 4:2:0 (200 Mbps at 1080p60). Capped to
     // what a gigabit link carries after FEC and audio, as moonlight-qt does.
-    public static int getDefaultPyroWaveBitrate(int width, int height, float fps) {
-        double kbps = (double) width * height * fps * 1.6 / 1000.0;
-        kbps = Math.max(20000.0, Math.min(900000.0, kbps));
-        return (int) kbps / 1000 * 1000;
-    }
-
     public static int getDefaultBitrate(Context context) {
         SharedPreferences prefs = ProfilesManager.getInstance().getOverlayingSharedPreferences(context);
         return getDefaultBitrate(
@@ -845,6 +863,7 @@ public class PreferenceConfiguration {
         SharedPreferences prefs = ProfilesManager.getInstance().getOverlayingSharedPreferences(context);
         prefs.edit()
                 .remove(BITRATE_PREF_STRING)
+                .remove(PYROWAVE_BITRATE_PREF_STRING)
                 .remove(BITRATE_PREF_OLD_STRING)
                 .remove(LEGACY_RES_FPS_PREF_STRING)
                 .remove(RESOLUTION_PREF_STRING)
@@ -992,6 +1011,12 @@ public class PreferenceConfiguration {
 
         // This must happen after the preferences migration to ensure the preferences are populated
         config.bitrate = prefs.getInt(BITRATE_PREF_STRING, prefs.getInt(BITRATE_PREF_OLD_STRING, 0) * 1000);
+        config.pyroWaveBitrate = prefs.getInt(PYROWAVE_BITRATE_PREF_STRING, DEFAULT_PYROWAVE_BITRATE);
+        config.pyroWaveKeepWarm = prefs.getBoolean(PYROWAVE_KEEP_WARM_PREF_STRING, DEFAULT_PYROWAVE_KEEP_WARM);
+        config.pyroWaveJitPacing = prefs.getBoolean(PYROWAVE_JIT_PACING_PREF_STRING, DEFAULT_PYROWAVE_JIT_PACING);
+        config.pyroWavePreParse = prefs.getBoolean(PYROWAVE_PREPARSE_PREF_STRING, DEFAULT_PYROWAVE_PREPARSE);
+        config.pyroWaveMatchRefresh = prefs.getBoolean(PYROWAVE_MATCH_REFRESH_PREF_STRING, DEFAULT_PYROWAVE_MATCH_REFRESH);
+        config.pyroWaveDetailedOverlay = prefs.getBoolean(PYROWAVE_DETAILED_OVERLAY_PREF_STRING, DEFAULT_PYROWAVE_DETAILED_OVERLAY);
         if (config.bitrate == 0) {
             config.bitrate = getDefaultBitrate(context);
         }

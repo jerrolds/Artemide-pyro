@@ -1,5 +1,7 @@
 #include "pw_vulkan.h"
 
+#include <android/log.h>
+
 #include <cstring>
 
 namespace {
@@ -163,17 +165,40 @@ bool PwVulkan::create(bool withSurface, std::string& error)
     m_QueueInfo.queueCount = 1;
     m_QueueInfo.pQueuePriorities = &m_QueuePriority;
 
+    // Ask for a high-priority queue so the decode is not delayed by the system's own graphics work.
+    // Android may refuse it for an ordinary app, in which case the device is created without it below.
+    bool wantHighPriority = false;
+    if (hasExtension(deviceExtensions, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME)) {
+        m_DeviceExtensions.push_back(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+        wantHighPriority = true;
+    }
+    VkDeviceQueueGlobalPriorityCreateInfoKHR priorityInfo = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR };
+    priorityInfo.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+    if (wantHighPriority) {
+        m_QueueInfo.pNext = &priorityInfo;
+    }
+
     m_DeviceInfo.pNext = &m_Features;
     m_DeviceInfo.queueCreateInfoCount = 1;
     m_DeviceInfo.pQueueCreateInfos = &m_QueueInfo;
     m_DeviceInfo.enabledExtensionCount = uint32_t(m_DeviceExtensions.size());
     m_DeviceInfo.ppEnabledExtensionNames = m_DeviceExtensions.data();
 
-    if (vkCreateDevice(m_PhysicalDevice, &m_DeviceInfo, nullptr, &m_Device) != VK_SUCCESS) {
+    VkResult created = vkCreateDevice(m_PhysicalDevice, &m_DeviceInfo, nullptr, &m_Device);
+    if (created != VK_SUCCESS && wantHighPriority) {
+        __android_log_print(ANDROID_LOG_INFO, "PyroWave", "High-priority Vulkan queue refused (%d); using the default priority", int(created));
+        m_QueueInfo.pNext = nullptr;
+        wantHighPriority = false;
+        // The extension stays enabled: it is harmless without a priority request
+        created = vkCreateDevice(m_PhysicalDevice, &m_DeviceInfo, nullptr, &m_Device);
+    }
+    if (created != VK_SUCCESS) {
         m_Device = VK_NULL_HANDLE;
         error = "vkCreateDevice failed";
         return false;
     }
+    m_HighPriority = wantHighPriority;
+    __android_log_print(ANDROID_LOG_INFO, "PyroWave", "Vulkan queue priority: %s", wantHighPriority ? "high" : "default");
     volkLoadDevice(m_Device);
     vkGetDeviceQueue(m_Device, m_QueueFamily, 0, &m_Queue);
     return true;

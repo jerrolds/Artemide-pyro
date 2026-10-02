@@ -29,6 +29,22 @@ void PwRendererSetWindow(struct ANativeWindow* window)
     (void)window;
 }
 
+void PwRendererSetKeepWarm(bool enabled, int refreshHz)
+{
+    (void)enabled;
+    (void)refreshHz;
+}
+
+void PwRendererSetPacing(bool justInTime)
+{
+    (void)justInTime;
+}
+
+void PwRendererSetPreParse(bool enabled)
+{
+    (void)enabled;
+}
+
 void PwRendererStart(void) {}
 void PwRendererStop(void) {}
 void PwRendererCleanup(void) {}

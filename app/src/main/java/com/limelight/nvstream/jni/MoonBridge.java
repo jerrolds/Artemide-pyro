@@ -76,7 +76,8 @@ public class MoonBridge {
     public static final int PYROWAVE_STAT_CLIENT_SUM_US = 34; // frame assembled -> GPU done
     public static final int PYROWAVE_STAT_CLIENT_SAMPLES = 35;
     public static final int PYROWAVE_STAT_CLIENT_MAX_US = 36; // peak since the last read
-    public static final int PYROWAVE_STAT_COUNT = 37;
+    public static final int PYROWAVE_STAT_WARM_FRAMES = 37; // keep-warm re-decodes, cumulative
+    public static final int PYROWAVE_STAT_COUNT = 38;
 
     public static final int BUFFER_TYPE_PICDATA = 0;
     public static final int BUFFER_TYPE_SPS = 1;
@@ -496,6 +497,12 @@ public class MoonBridge {
     public static native void pyroWaveGetStats(long[] stats);
     // {sum, count, min, max} of host processing latency in 0.1 ms; min/max reset on each call
     public static native void pyroWaveGetHostLatency(long[] out);
+    // Keep the GPU busy while the host sends few frames (see the PyroWave keep-warm setting)
+    public static native void pyroWaveSetKeepWarm(boolean enabled, int refreshHz);
+    // Experimental just-in-time frame pacing (see the PyroWave low-latency pacing setting)
+    public static native void pyroWaveSetPacing(boolean justInTime);
+    // Experimental: parse frames on a helper thread as they arrive
+    public static native void pyroWaveSetPreParse(boolean enabled);
 
     public static native void init();
 }

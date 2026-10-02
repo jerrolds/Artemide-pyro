@@ -136,13 +136,20 @@ android {
             //
             // TL;DR: Leave the following line alone!
             applicationIdSuffix ".noir"
-            resValue "string", "app_label", "Artemis"
-            resValue "string", "app_label_root", "Artemis (Root)"
-            resValue "string", "app_label_game", "Artemis (Game)"
+            resValue "string", "app_label", "PyroArt"
+            resValue "string", "app_label_root", "PyroArt (Root)"
+            resValue "string", "app_label_game", "PyroArt (Game)"
 
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             shrinkResources true
+
+            // Optimised native code: see Application.mk (APP_PYRO_OPT)
+            externalNativeBuild {
+                ndkBuild {
+                    arguments "APP_PYRO_OPT:=1", "APP_OPTIM:=release", "NDK_DEBUG=0"
+                }
+            }
         }
 perf {
     initWith release

@@ -861,11 +861,12 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 if (willStreamHdr) {
                     supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE_HDR10;
                 }
-                if (prefConfig.bitrateIsDefault) {
-                    nonPyroWaveBitrate = streamBitrate;
-                    streamBitrate = PreferenceConfiguration.getDefaultPyroWaveBitrate(
-                            prefConfig.width, prefConfig.height, prefConfig.fps);
-                }
+                // PyroWave has its own bitrate setting: its frames are coded one at a time, so the right
+                // value is far from the other codecs'. The ordinary bitrate stays the fallback for hosts
+                // that cannot stream PyroWave.
+                nonPyroWaveBitrate = streamBitrate;
+                streamBitrate = prefConfig.pyroWaveBitrate;
+                LimeLog.info("PyroWave bitrate: " + (streamBitrate / 1000) + " Mbps");
             }
             else {
                 Toast.makeText(this, getString(R.string.pyrowave_unavailable, MoonBridge.getPyroWaveStatus()),
@@ -893,6 +894,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // desired FPS setting here in accordance with the active display refresh rate.
         int roundedRefreshRate = Math.round(displayRefreshRate);
         float chosenFrameRate = prefConfig.fps;
+        float launchFrameRate = prefConfig.fps;
         if (prefConfig.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
             if (prefConfig.fps >= roundedRefreshRate) {
                 if (prefConfig.fps > roundedRefreshRate + 3) {
@@ -915,6 +917,14 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             chosenFrameRate *= prefConfig.framePacingWarpFactor;
         }
 
+        // PyroWave: ask the host for exactly the display's refresh rate, so it neither floods the link with frames
+        // the screen cannot show nor drifts against the display (also from Moonlight X)
+        if (pyroWaveForced && prefConfig.pyroWaveMatchRefresh && roundedRefreshRate > 0) {
+            chosenFrameRate = roundedRefreshRate;
+            launchFrameRate = roundedRefreshRate;
+            LimeLog.info("PyroWave: requesting the display's " + roundedRefreshRate + " fps from the host");
+        }
+
         int resolutionScaleFactor = prefConfig.resolutionScaleFactor;
         if (prefConfig.autoResolutionScaleFactor) {
             resolutionScaleFactor = PreferenceConfiguration.calculateAutoResolutionScaleFactor(
@@ -929,7 +939,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                         displayWidth,
                         displayHeight
                 )
-                .setLaunchRefreshRate(prefConfig.fps)
+                .setLaunchRefreshRate(launchFrameRate)
                 .setRefreshRate(chosenFrameRate)
                 .setVirtualDisplay(vDisplay)
                 .setResolutionScaleFactor(resolutionScaleFactor)
@@ -1554,6 +1564,14 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         return false;
     }
 
+    // PyroWave presents with Vulkan at the display's own pace, so unlike the MediaCodec paths it gains nothing
+    // from slowing the display down to the stream's frame rate. Idea taken from Moonlight X: a 60 fps stream on
+    // a 120 Hz panel keeps the 120 Hz mode, which roughly halves the wait for the next refresh.
+    private boolean isPyroWaveStream() {
+        return prefConfig != null && prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE &&
+                PyroWaveRenderer.isAvailable();
+    }
+
     private boolean mayReduceRefreshRate() {
         return prefConfig.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS ||
                 prefConfig.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
@@ -1576,6 +1594,26 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         // On M, we can explicitly set the optimal display mode
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Display.Mode bestMode = currentDisplay.getMode();
+
+            if (isPyroWaveStream()) {
+                // Keep the highest refresh rate at the current resolution, whatever the stream's frame rate is
+                for (Display.Mode candidate : currentDisplay.getSupportedModes()) {
+                    if (candidate.getPhysicalWidth() == bestMode.getPhysicalWidth() &&
+                            candidate.getPhysicalHeight() == bestMode.getPhysicalHeight() &&
+                            candidate.getRefreshRate() > bestMode.getRefreshRate()) {
+                        bestMode = candidate;
+                    }
+                }
+                LimeLog.info("PyroWave: keeping the display at " + bestMode.getRefreshRate() + " Hz");
+                if (currentDisplay.getMode().getModeId() != bestMode.getModeId() &&
+                        (prefConfig.enforceDisplayMode || Build.VERSION.SDK_INT < Build.VERSION_CODES.S)) {
+                    windowLayoutParams.preferredDisplayModeId = bestMode.getModeId();
+                    getWindow().setAttributes(windowLayoutParams);
+                }
+                // From Android 12 on the surface frame-rate hint (see applySurfaceFrameRateHintIfPossible) does the rest
+                return bestMode.getRefreshRate();
+            }
+
             boolean isNativeResolutionStream = PreferenceConfiguration.isNativeResolution(prefConfig.width, prefConfig.height);
             boolean refreshRateIsGood = isRefreshRateGoodMatch(bestMode.getRefreshRate());
             boolean refreshRateIsEqual = isRefreshRateEqualMatch(bestMode.getRefreshRate());
@@ -1814,7 +1852,11 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
             //
             // For streaming we want the Surface pipeline (SF/HWC) to pace to the *stream FPS*,
             // not to the current display refresh rate (e.g. 120Hz panel with a 60fps stream).
-            final float desiredFrameRate = prefConfig.fps;
+            float desiredFrameRate = prefConfig.fps;
+            if (isPyroWaveStream() && desiredRefreshRate > 0f) {
+                // PyroWave: ask for the display's own rate, not the stream's (see isPyroWaveStream)
+                desiredFrameRate = desiredRefreshRate;
+            }
             if (desiredFrameRate <= 0f) {
                 return;
             }

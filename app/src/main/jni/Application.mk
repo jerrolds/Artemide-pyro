@@ -14,6 +14,23 @@ APP_STL := c++_shared
 # ARM ABI support
 APP_ABI := arm64-v8a armeabi-v7a
 
+# === Release optimisation without the experimental perf behaviour ===
+# The compiler and linker flags of APP_PERF (-O3, ThinLTO, dead-code stripping), but without
+# -DLC_EXPERIMENTAL_DECODEQ_DROP_OLDEST, so the MediaCodec paths behave as in upstream's release builds.
+ifeq ($(APP_PYRO_OPT),1)
+ifneq ($(APP_PERF),1)
+    APP_OPTIM := release
+    APP_CFLAGS   += -flto=thin -O3 -DNDEBUG -ffunction-sections -fdata-sections
+    APP_CPPFLAGS += -flto=thin -O3 -DNDEBUG -ffunction-sections -fdata-sections
+    APP_LDFLAGS  += -flto=thin -fuse-ld=lld -Wl,--icf=safe -Wl,--gc-sections -Wl,--lto-O3
+    ifneq (,$(findstring arm64-v8a,$(APP_ABI)))
+        APP_CFLAGS   += -moutline-atomics
+        APP_CPPFLAGS += -moutline-atomics
+    endif
+    $(info [NDK] RELEASE: ThinLTO + O3, no experimental decode queue)
+endif
+endif
+
 # === Perf-only overrides ===
 ifeq ($(APP_PERF),1)
     ifndef APP_OPTIM

@@ -29,6 +29,8 @@ public:
     uint32_t queueFamily() const { return m_QueueFamily; }
     const char* deviceName() const { return m_Properties.properties.deviceName; }
     bool hasSwapchain() const { return m_HasSwapchain; }
+    // The queue was created with high global priority (Android may refuse it)
+    bool highPriority() const { return m_HighPriority; }
     // VK_EXT_swapchain_colorspace: HDR10 swapchain formats can be offered
     bool hasHdrColorSpace() const { return m_HasHdrColorSpace; }
     // VK_EXT_hdr_metadata: the mastering display can be described to the display
@@ -62,6 +64,7 @@ private:
     VkQueue m_Queue = VK_NULL_HANDLE;
     uint32_t m_QueueFamily = 0;
     bool m_HasSwapchain = false;
+    bool m_HighPriority = false;
     bool m_HasHdrColorSpace = false;
     bool m_HasHdrMetadata = false;
     uint32_t m_TimestampValidBits = 0;

@@ -28,6 +28,21 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveSetup(JNIEnv* env, jclass cla
 }
 
 JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveSetKeepWarm(JNIEnv* env, jclass clazz, jboolean enabled, jint refreshHz) {
+    PwRendererSetKeepWarm(enabled == JNI_TRUE, refreshHz);
+}
+
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveSetPacing(JNIEnv* env, jclass clazz, jboolean justInTime) {
+    PwRendererSetPacing(justInTime == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveSetPreParse(JNIEnv* env, jclass clazz, jboolean enabled) {
+    PwRendererSetPreParse(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveSetSurface(JNIEnv* env, jclass clazz, jobject surface) {
     ANativeWindow* window = surface != nullptr ? ANativeWindow_fromSurface(env, surface) : nullptr;
     // The renderer takes its own reference
@@ -52,7 +67,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveCleanup(JNIEnv* env, jclass c
     PwRendererCleanup();
 }
 
-// Fills stats (length >= 37) in the order of MoonBridge.PYROWAVE_STAT_*
+// Fills stats (length >= 38) in the order of MoonBridge.PYROWAVE_STAT_*
 JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetStats(JNIEnv* env, jclass clazz, jlongArray stats) {
     PW_RENDERER_STATS s;
@@ -68,7 +83,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveGetStats(JNIEnv* env, jclass 
         s.hintKind, s.framesInFlight, s.surfaceCount, s.gpuTimingEnabled ? 1 : 0,
         (jlong)s.gpuDecodeUs, (jlong)s.gpuConvertUs, (jlong)s.gpuSamples,
         (jlong)s.assemblySumMs, s.clientTiming ? 1 : 0, (jlong)s.clientSumUs, (jlong)s.clientSamples,
-        s.clientMaxUs,
+        s.clientMaxUs, s.warmFrames,
     };
     const jsize count = sizeof(values) / sizeof(values[0]);
     if (env->GetArrayLength(stats) >= count) {

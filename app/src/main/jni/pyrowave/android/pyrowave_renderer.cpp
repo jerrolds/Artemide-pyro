@@ -9,6 +9,7 @@
 #include <android/native_window.h>
 
 #include <dlfcn.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -82,6 +83,8 @@ public:
         m_DurCpu = fn<void (*)(AWorkDuration*, int64_t)>(lib, "AWorkDuration_setActualCpuDurationNanos");
         m_DurGpu = fn<void (*)(AWorkDuration*, int64_t)>(lib, "AWorkDuration_setActualGpuDurationNanos");
         m_Notify = fn<int (*)(APerformanceHintSession*, bool, bool, const char*)>(lib, "APerformanceHint_notifyWorkloadIncrease");
+        m_Spike = fn<int (*)(APerformanceHintSession*, bool, bool, const char*)>(lib, "APerformanceHint_notifyWorkloadSpike");
+        m_SetPower = fn<int (*)(APerformanceHintSession*, bool)>(lib, "APerformanceHint_setPreferPowerEfficiency");
 
         const pid_t tid = pid_t(syscall(SYS_gettid));
 
@@ -91,6 +94,7 @@ public:
         auto cfgTids = fn<void (*)(ASessionCreationConfig*, const pid_t*, size_t)>(lib, "ASessionCreationConfig_setTids");
         auto cfgTarget = fn<void (*)(ASessionCreationConfig*, int64_t)>(lib, "ASessionCreationConfig_setTargetWorkDurationNanos");
         auto cfgGraphics = fn<void (*)(ASessionCreationConfig*, bool)>(lib, "ASessionCreationConfig_setGraphicsPipeline");
+        auto cfgPower = fn<void (*)(ASessionCreationConfig*, bool)>(lib, "ASessionCreationConfig_setPreferPowerEfficiency");
         auto createUsingConfig = fn<int (*)(APerformanceHintManager*, ASessionCreationConfig*, APerformanceHintSession**)>(
             lib, "APerformanceHint_createSessionUsingConfig");
 
@@ -100,6 +104,10 @@ public:
             cfgTids(config, &tid, 1);
             cfgTarget(config, targetNs);
             cfgGraphics(config, true);
+            // Latency matters more than battery here: do not let the system pick efficiency
+            if (cfgPower != nullptr) {
+                cfgPower(config, false);
+            }
             APerformanceHintSession* session = nullptr;
             if (createUsingConfig(manager, config, &session) == 0 && session != nullptr) {
                 m_Session = session;
@@ -125,11 +133,19 @@ public:
         }
 
         m_TargetNs = targetNs;
+        bool powerSet = false;
+        if (m_SetPower != nullptr) {
+            powerSet = m_SetPower(m_Session, false) == 0;
+        }
         if (m_Notify != nullptr) {
             m_Notify(m_Session, true, true, "pyrowave");
         }
-        pwLog(ANDROID_LOG_INFO, "Performance hints: %s session, target %.2f ms, CPU/GPU timing %s",
-              kind, double(targetNs) / 1e6, m_Report2 != nullptr ? "reported" : "total only");
+        if (m_Spike != nullptr) {
+            m_Spike(m_Session, true, true, "pyrowave");
+        }
+        pwLog(ANDROID_LOG_INFO, "Performance hints: %s session, target %.2f ms, CPU/GPU timing %s, prefer performance %s, spike notice %s",
+              kind, double(targetNs) / 1e6, m_Report2 != nullptr ? "reported" : "total only",
+              powerSet ? "set" : "not available", m_Spike != nullptr ? "available" : "not available");
     }
 
     // Times are nanoseconds on CLOCK_MONOTONIC (std::chrono::steady_clock on Android)
@@ -157,6 +173,9 @@ public:
         if (totalNs > m_TargetNs) {
             if (++m_Over >= 10 && m_Notify != nullptr && startNs - m_LastNotifyNs >= 500000000LL) {
                 m_Notify(m_Session, true, true, "pyrowave");
+                if (m_Spike != nullptr) {
+                    m_Spike(m_Session, true, true, "pyrowave");
+                }
                 m_LastNotifyNs = startNs;
             }
         }
@@ -198,6 +217,8 @@ private:
     int (*m_Report)(APerformanceHintSession*, int64_t) = nullptr;
     int (*m_Report2)(APerformanceHintSession*, AWorkDuration*) = nullptr;
     int (*m_Notify)(APerformanceHintSession*, bool, bool, const char*) = nullptr;
+    int (*m_Spike)(APerformanceHintSession*, bool, bool, const char*) = nullptr;
+    int (*m_SetPower)(APerformanceHintSession*, bool) = nullptr;
     AWorkDuration* (*m_DurCreate)() = nullptr;
     void (*m_DurRelease)(AWorkDuration*) = nullptr;
     void (*m_DurStart)(AWorkDuration*, int64_t) = nullptr;
@@ -255,10 +276,6 @@ public:
         m_Mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
         m_PeriodNs = double(vulkan.timestampPeriodNs());
         m_Enabled = true;
-
-        // The GPU clock can only be placed on CLOCK_MONOTONIC if the driver supports that time domain
-        uint64_t ticks = 0, nanoseconds = 0;
-        m_ClientTiming = vulkan.calibrate(ticks, nanoseconds);
         return true;
     }
 
@@ -272,12 +289,9 @@ public:
     }
 
     bool enabled() const { return m_Enabled; }
-    // Whether frames can be timed from the library's "assembled" stamp to the GPU finishing
-    bool clientTiming() const { return m_Enabled && m_ClientTiming; }
 
-    // Starts timing the frame that uses this slot, if it is one of the sampled frames.
-    // enqueueUs is when the frame was assembled, on CLOCK_MONOTONIC in microseconds.
-    bool begin(int slot, uint64_t enqueueUs)
+    // Starts timing the frame that uses this slot, if it is one of the sampled frames
+    bool begin(int slot)
     {
         if (!m_Enabled || ++m_Counter % kSampleEvery != 0) {
             return false;
@@ -288,7 +302,6 @@ public:
         }
         s.pending = true;
         s.valid = true;
-        s.enqueueUs = enqueueUs;
         stamp(slot, 0);
         return true;
     }
@@ -310,17 +323,13 @@ public:
     uint64_t decodeUs() const { return m_DecodeUs; }
     uint64_t convertUs() const { return m_ConvertUs; }
     uint64_t samples() const { return m_Samples; }
-    // Assembled to GPU done, summed over the frames that could be placed on the clock
-    uint64_t clientSumUs() const { return m_ClientSumUs; }
-    uint64_t clientSamples() const { return m_ClientSamples; }
-    // The largest since the previous call
-    uint32_t takeClientMaxUs() const { return m_ClientMaxUs.exchange(0); }
+    // Smoothed GPU time of one frame's decode plus colour conversion, 0 until the first sample
+    uint32_t frameEmaUs() const { return m_FrameEmaUs.load(std::memory_order_relaxed); }
 
 private:
     struct Slot {
         bool pending = false;
         bool valid = false;
-        uint64_t enqueueUs = 0;
     };
 
     void stamp(int slot, int which)
@@ -355,23 +364,12 @@ private:
             m_DecodeUs += uint64_t(double((data[2] - data[0]) & m_Mask) * toUs);
             m_ConvertUs += uint64_t(double((data[4] - data[2]) & m_Mask) * toUs);
             m_Samples++;
+            // Smoothed GPU time per frame, for the render loop's pacing
+            const double frameUs = double((data[4] - data[0]) & m_Mask) * toUs;
+            const uint32_t previous = m_FrameEmaUs.load(std::memory_order_relaxed);
+            m_FrameEmaUs.store(previous == 0 ? uint32_t(frameUs) : uint32_t(double(previous) * 0.8 + frameUs * 0.2),
+                               std::memory_order_relaxed);
 
-            // Place "colour conversion done" on CLOCK_MONOTONIC: read both clocks now and
-            // step back by how long ago the GPU wrote that timestamp
-            uint64_t ticksNow = 0, monotonicNowNs = 0;
-            if (m_ClientTiming && m_Vulkan->calibrate(ticksNow, monotonicNowNs)) {
-                const double agoNs = double((ticksNow - data[4]) & m_Mask) * m_PeriodNs;
-                const double doneUs = (double(monotonicNowNs) - agoNs) / 1000.0;
-                const double clientUs = doneUs - double(m_Slots[slot].enqueueUs);
-                // Anything outside this is a stale or mismatched stamp, not a latency
-                if (agoNs < 1e9 && clientUs > 0.0 && clientUs < 1e6) {
-                    m_ClientSumUs += uint64_t(clientUs);
-                    m_ClientSamples++;
-                    uint32_t peak = m_ClientMaxUs.load(std::memory_order_relaxed);
-                    while (uint32_t(clientUs) > peak && !m_ClientMaxUs.compare_exchange_weak(peak, uint32_t(clientUs))) {
-                    }
-                }
-            }
         }
         vkResetQueryPool(device, m_Pool, uint32_t(slot * kStamps), kStamps);
         m_Slots[slot].pending = false;
@@ -386,17 +384,167 @@ private:
     double m_PeriodNs = 0.0;
     uint32_t m_Counter = 0;
     bool m_Enabled = false;
-    bool m_ClientTiming = false;
     std::atomic<uint64_t> m_DecodeUs { 0 }, m_ConvertUs { 0 }, m_Samples { 0 };
-    std::atomic<uint64_t> m_ClientSumUs { 0 }, m_ClientSamples { 0 };
-    mutable std::atomic<uint32_t> m_ClientMaxUs { 0 };
+    std::atomic<uint32_t> m_FrameEmaUs { 0 };
+};
+
+// Measures "frame assembled by moonlight-common-c" -> "GPU finished the frame" (the client latency
+// that HEVC's overlay calls Delay). The earlier version placed GPU timestamps on CLOCK_MONOTONIC with
+// calibrated timestamps and never produced a sample on the Adreno driver, so this one needs no GPU clock
+// at all: a helper thread waits on the render timeline for a sampled frame and notes the time the wait
+// returns, on the clock the library stamps frames with.
+class LatencyProbe {
+public:
+    ~LatencyProbe() { stop(); }
+
+    void start(VkDevice device, VkSemaphore timeline)
+    {
+        if (m_Running.load() || timeline == VK_NULL_HANDLE) {
+            return;
+        }
+        m_Device = device;
+        m_Timeline = timeline;
+        m_Stop = false;
+        m_Head = 0;
+        m_Count = 0;
+        m_Running = true;
+        m_Thread = std::thread(&LatencyProbe::run, this);
+    }
+
+    void stop()
+    {
+        if (!m_Running.load()) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(m_Lock);
+            m_Stop = true;
+        }
+        m_Wake.notify_all();
+        if (m_Thread.joinable()) {
+            m_Thread.join();
+        }
+        m_Running = false;
+    }
+
+    bool enabled() const { return m_Running.load(); }
+
+    // Render thread: the frame whose render finishes at timeline value "value" was assembled at
+    // enqueueUs (CLOCK_MONOTONIC, microseconds). Best effort: a full queue just skips the sample.
+    void sample(uint64_t value, uint64_t enqueueUs)
+    {
+        std::lock_guard<std::mutex> guard(m_Lock);
+        if (m_Count == kQueue) {
+            return;
+        }
+        m_Ring[(m_Head + m_Count) % kQueue] = { value, enqueueUs };
+        m_Count++;
+        m_Wake.notify_one();
+    }
+
+    uint64_t sumUs() const { return m_SumUs; }
+    uint64_t samples() const { return m_Samples; }
+    // The largest since the previous call
+    uint32_t takeMaxUs() const { return m_MaxUs.exchange(0); }
+
+private:
+    static constexpr uint32_t kQueue = 16;
+
+    struct Item {
+        uint64_t value = 0;
+        uint64_t enqueueUs = 0;
+    };
+
+    void run()
+    {
+        for (;;) {
+            Item item;
+            {
+                std::unique_lock<std::mutex> lock(m_Lock);
+                m_Wake.wait(lock, [this]() { return m_Stop.load() || m_Count > 0; });
+                if (m_Stop.load()) {
+                    return;
+                }
+                item = m_Ring[m_Head];
+                m_Head = (m_Head + 1) % kQueue;
+                m_Count--;
+            }
+
+            VkSemaphoreWaitInfo waitInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+            waitInfo.semaphoreCount = 1;
+            waitInfo.pSemaphores = &m_Timeline;
+            waitInfo.pValues = &item.value;
+            VkResult result;
+            do {
+                // A short timeout so that stop() is noticed promptly
+                result = vkWaitSemaphores(m_Device, &waitInfo, 20000000ull);
+            } while (result == VK_TIMEOUT && !m_Stop.load());
+            if (result != VK_SUCCESS) {
+                continue;
+            }
+
+            const uint64_t done = nowUs();
+            const int64_t clientUs = int64_t(done) - int64_t(item.enqueueUs);
+            if (clientUs > 0 && clientUs < 1000000) {
+                m_SumUs += uint64_t(clientUs);
+                m_Samples++;
+                uint32_t peak = m_MaxUs.load(std::memory_order_relaxed);
+                while (uint32_t(clientUs) > peak && !m_MaxUs.compare_exchange_weak(peak, uint32_t(clientUs))) {
+                }
+            }
+            else if (done - m_LastRejectLogUs >= 5000000) {
+                // An implausible value means the frame stamp is on another clock: say so once in a while
+                m_LastRejectLogUs = done;
+                pwLog(ANDROID_LOG_INFO, "Client latency sample rejected: %lld us (assembled at %llu us, now %llu us)",
+                      (long long)clientUs, (unsigned long long)item.enqueueUs, (unsigned long long)done);
+            }
+        }
+    }
+
+    VkDevice m_Device = VK_NULL_HANDLE;
+    VkSemaphore m_Timeline = VK_NULL_HANDLE;
+    std::thread m_Thread;
+    std::atomic<bool> m_Running { false };
+    std::atomic<bool> m_Stop { false };
+    std::mutex m_Lock;
+    std::condition_variable m_Wake;
+    Item m_Ring[kQueue];
+    uint32_t m_Head = 0, m_Count = 0;
+    uint64_t m_LastRejectLogUs = 0; // probe thread only
+    std::atomic<uint64_t> m_SumUs { 0 }, m_Samples { 0 };
+    mutable std::atomic<uint32_t> m_MaxUs { 0 };
 };
 
 // Enough for the decode of one frame to overlap the render of the previous
-// one while a third waits for the display. A deeper queue keeps the GPU busy
-// across the CPU's per-frame work, so mobile clock governors see a full load.
-constexpr int k_SurfaceCount = 4;
-constexpr int k_FramesInFlight = 3;
+// one while a third waits for the display. Each extra frame in flight is a frame
+// of latency once the GPU is the bottleneck, and 3 deep did not raise the GPU
+// clock (measured), so the queue is kept shallow.
+constexpr int k_SurfaceCount = 3;
+constexpr int k_FramesInFlight = 2;
+
+// Keep-warm (see Renderer::renderLoop), set from Java before a stream. Mobile GPU clock governors step
+// down when the load dips and then climb back only partway, which costs frames. While the host sends
+// fewer frames than the display refreshes, the last frame is decoded again at the display's rate so the
+// GPU never looks idle. Real frames always take priority.
+std::atomic<bool> g_KeepWarm { false };
+// Parse each frame on a helper thread as soon as it arrives (see Renderer::prepLoop), so the render thread
+// only has to submit it. Experimental, off by default.
+std::atomic<bool> g_PreParse { false };
+std::atomic<uint32_t> g_WarmPeriodUs { 8333 };
+// Stop warming when the host has sent nothing for this long, so a paused stream does not burn power
+constexpr uint64_t k_WarmIdleLimitUs = 2000000;
+
+// Just-in-time pacing (see Renderer::renderLoop). When the GPU is the bottleneck, a frame taken the
+// moment a slot frees waits behind the frame being decoded, so it is a whole GPU frame old by the time
+// its own decode starts. With this on, the render thread takes the newest frame only when the GPU is
+// about to be free. Experimental, off by default.
+std::atomic<bool> g_JitPacing { false };
+// Safety margin before the predicted end of the GPU's current work. A frame taken too late leaves the
+// GPU idle for the difference, which costs throughput; one taken too early only waits a little longer.
+// Measured: a 0.5 ms margin lost 10-25 fps when the GPU was the bottleneck, so lean towards early.
+constexpr uint64_t k_JitMarginUs = 1500;
+// The smoothed GPU time per frame includes some waiting, so assume the GPU is a little faster than measured
+constexpr double k_JitGpuScale = 0.92;
 
 struct Frame {
     std::vector<uint8_t> data;
@@ -405,6 +553,7 @@ struct Frame {
     int colorspace = COLORSPACE_REC_709;
     int frameNumber = 0;
     bool hdr = false; // HDR10: PQ-encoded, normally BT.2020
+    bool partial = false; // set by the parse thread: the frame was missing records
     // When moonlight-common-c finished assembling the frame, on CLOCK_MONOTONIC in
     // microseconds. The library's stamp has 1 ms resolution, so add the average rounding.
     uint64_t enqueueUs = 0;
@@ -423,7 +572,14 @@ public:
 
 private:
     void renderLoop();
-    void process(const Frame& frame);
+    void renderLoopPreparsed();
+    void prepLoop();
+    void paceForGpu();
+    void reportDecoderStages();
+    void waitForFreeSlot();
+    // decoderLock: when not null, the caller holds the decoder lock and process() releases it as soon as the
+    // decoder has been used. prepared: the frame was already parsed into the decoder (pre-parse mode).
+    void process(const Frame& frame, bool warm, std::unique_lock<std::mutex>* decoderLock = nullptr, bool prepared = false);
     bool present(int surface, uint64_t decodeValue, int colorspace);
     void waitIdle();
     void publishOutput();
@@ -453,8 +609,17 @@ private:
     Frame m_Pending;
     Frame m_Working; // only touched by the render thread
     bool m_PendingValid = false;
-    bool m_Stopping = false;
+    std::atomic<bool> m_Stopping { false };
     std::thread m_Thread;
+
+    // Pre-parse mode: a helper thread parses frames into the decoder while the GPU works on the previous one
+    std::thread m_PrepThread;
+    std::mutex m_DecoderLock; // serialises prepare() and submit() on the decoder, and guards the flags below
+    std::condition_variable m_PreparedReady;
+    Frame m_PrepWork;         // prep thread only: the frame being parsed
+    Frame m_PreparedFrame;    // the frame whose packets are in the decoder, with its metadata
+    bool m_PreparedValid = false;
+    std::atomic<double> m_ParseUs { 2000.0 };
     PerfHint m_PerfHint; // only touched by the render thread
 
     // Held while the render thread uses the swapchain, and while it is replaced
@@ -466,7 +631,7 @@ private:
     std::atomic<uint32_t> m_OutputWidth { 0 }, m_OutputHeight { 0 };
     std::atomic<bool> m_Mailbox { false };
     std::atomic<bool> m_HdrOutput { false };
-    uint64_t m_LastErrorLogUs = 0;
+    std::atomic<uint64_t> m_LastErrorLogUs { 0 };
 
     // Detail for the overlay. Counted on the submitting thread, read by the stats thread.
     std::atomic<uint64_t> m_ReceivedBytes { 0 };
@@ -480,6 +645,20 @@ private:
     std::atomic<uint32_t> m_SwapchainFormat { 0 }, m_SwapchainImages { 0 };
     std::atomic<int> m_HintKind { 0 };
     GpuTimer m_GpuTimer; // only touched by the render thread, apart from its totals
+    LatencyProbe m_LatencyProbe;
+    uint32_t m_LatencySampleCounter = 0; // render thread only
+
+    // Keep-warm state, render thread only
+    bool m_HaveFrame = false;     // m_Working holds the last real frame
+    std::atomic<bool> m_LastDecodeOk { false }; // and it decoded fine (the parse thread can clear it)
+    uint64_t m_LastProcessUs = 0; // when the render thread last started a frame
+    uint64_t m_LastRealFrameUs = 0;
+    std::atomic<uint32_t> m_WarmFrames { 0 };
+
+    // Just-in-time pacing state, render thread only
+    uint64_t m_PredDoneUs = 0; // when the GPU is expected to finish what has been submitted
+    uint64_t m_LastStageReportUs = 0;
+    double m_CpuUs = 1800.0;   // smoothed CPU time from taking a frame to having its decode submitted
 };
 
 Renderer::~Renderer()
@@ -620,7 +799,15 @@ void Renderer::start()
         return;
     }
     m_Stopping = false;
-    m_Thread = std::thread(&Renderer::renderLoop, this);
+    if (g_PreParse.load()) {
+        m_PrepThread = std::thread(&Renderer::prepLoop, this);
+        m_Thread = std::thread(&Renderer::renderLoopPreparsed, this);
+        pwLog(ANDROID_LOG_INFO, "Frames are parsed on arrival");
+    }
+    else {
+        m_Thread = std::thread(&Renderer::renderLoop, this);
+    }
+    m_LatencyProbe.start(m_Vulkan.device(), m_RenderTimeline);
 }
 
 void Renderer::stop()
@@ -631,9 +818,18 @@ void Renderer::stop()
         m_PendingValid = false;
     }
     m_FrameReady.notify_all();
+    {
+        // Take the decoder lock once so a wait on the render side cannot miss the wake-up
+        std::lock_guard<std::mutex> guard(m_DecoderLock);
+    }
+    m_PreparedReady.notify_all();
+    if (m_PrepThread.joinable()) {
+        m_PrepThread.join();
+    }
     if (m_Thread.joinable()) {
         m_Thread.join();
     }
+    m_LatencyProbe.stop();
 }
 
 int Renderer::submit(PDECODE_UNIT du)
@@ -706,31 +902,205 @@ int Renderer::submit(PDECODE_UNIT du)
 
 void Renderer::renderLoop()
 {
-    // The deadline is a little tighter than one frame at the tablet's 120 Hz (8.33 ms),
-    // so a frame that only just fits still asks the system for a faster GPU clock
-    m_PerfHint.start(7500000);
+    // The target is about half a frame at 120 Hz (8.33 ms): the GPU work takes longer than that, so the
+    // system keeps seeing late work and keeps the clock up. A 7.5 ms target let the governor settle one
+    // step short of what the load needs.
+    m_PerfHint.start(4000000);
     m_HintKind = m_PerfHint.kind();
+
+    // Same boost the MediaCodec renderer thread gets (THREAD_PRIORITY_URGENT_DISPLAY)
+    if (setpriority(PRIO_PROCESS, 0, -8) != 0) {
+        pwLog(ANDROID_LOG_INFO, "Render thread priority boost was refused");
+    }
+
     for (;;) {
+        // Wait for the GPU to have room before taking a frame, so the frame taken is the
+        // newest one: frames arriving during the wait replace the pending one instead of
+        // queueing behind a stale one
+        paceForGpu();
+        waitForFreeSlot();
+        bool warm = false;
         {
             std::unique_lock<std::mutex> lock(m_FrameLock);
-            m_FrameReady.wait(lock, [this]() { return m_Stopping || m_PendingValid; });
+            const auto ready = [this]() { return m_Stopping || m_PendingValid; };
+
+            // Keep-warm: if the host has not sent a new frame by the time one display refresh has passed
+            // since the last frame started, decode the last one again. A real frame always wins, because
+            // the wait ends as soon as one is pending.
+            const bool canWarm = g_KeepWarm.load(std::memory_order_relaxed) && m_HaveFrame && m_LastDecodeOk &&
+                                 nowUs() - m_LastRealFrameUs < k_WarmIdleLimitUs;
+            if (canWarm) {
+                const std::chrono::steady_clock::time_point deadline{
+                    std::chrono::microseconds(m_LastProcessUs + g_WarmPeriodUs.load(std::memory_order_relaxed)) };
+                warm = !m_FrameReady.wait_until(lock, deadline, ready);
+            }
+            else {
+                m_FrameReady.wait(lock, ready);
+            }
+
             if (m_Stopping) {
                 m_PerfHint.stop();
                 return;
             }
-            std::swap(m_Pending, m_Working);
-            m_PendingValid = false;
+            if (!warm) {
+                std::swap(m_Pending, m_Working);
+                m_PendingValid = false;
+                m_HaveFrame = true;
+                m_LastRealFrameUs = nowUs();
+            }
         }
 
         std::lock_guard<std::mutex> guard(m_RenderLock);
-        process(m_Working);
+        process(m_Working, warm);
     }
 }
 
-void Renderer::process(const Frame& frame)
+// Just-in-time pacing: wait until the GPU is about to be free, so that the newest frame is taken as late as
+// possible and its CPU work ends as the GPU becomes available
+void Renderer::paceForGpu()
+{
+    if (!g_JitPacing.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const uint32_t gpuUs = m_GpuTimer.frameEmaUs();
+    if (gpuUs == 0 || m_PredDoneUs == 0) {
+        return;
+    }
+    const uint64_t lead = uint64_t(m_CpuUs) + k_JitMarginUs;
+    const uint64_t target = m_PredDoneUs > lead ? m_PredDoneUs - lead : 0;
+    const uint64_t now = nowUs();
+    if (target > now) {
+        const uint64_t sleepUs = std::min<uint64_t>(target - now, 20000);
+        std::unique_lock<std::mutex> lock(m_FrameLock);
+        m_FrameReady.wait_for(lock, std::chrono::microseconds(sleepUs), [this]() { return m_Stopping.load(); });
+    }
+}
+
+void Renderer::reportDecoderStages()
+{
+    // The decoder is not thread safe: wait for any parse in progress
+    std::lock_guard<std::mutex> guard(m_DecoderLock);
+    m_Decoder.reportStages([](void*, const char* message) {
+        pwLog(ANDROID_LOG_INFO, "Decoder stage: %s", message);
+    });
+}
+
+// Pre-parse mode, helper thread: takes the newest arrived frame and parses it into the decoder. The library
+// copies the decoder's CPU buffers when the GPU work is recorded, so this can overlap the GPU decoding the
+// previous frame. A frame parsed but not yet submitted when a newer one arrives is simply parsed over.
+void Renderer::prepLoop()
+{
+    if (setpriority(PRIO_PROCESS, 0, -4) != 0) {
+        pwLog(ANDROID_LOG_INFO, "Parse thread priority boost was refused");
+    }
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(m_FrameLock);
+            m_FrameReady.wait(lock, [this]() { return m_Stopping.load() || m_PendingValid; });
+            if (m_Stopping) {
+                return;
+            }
+            std::swap(m_Pending, m_PrepWork);
+            m_PendingValid = false;
+        }
+
+        std::unique_lock<std::mutex> decoderLock(m_DecoderLock);
+        if (m_Stopping) {
+            return;
+        }
+        if (m_PreparedValid) {
+            // The frame parsed before was never submitted: this newer one replaces it
+            m_Replaced++;
+            m_PreparedValid = false;
+        }
+        const uint64_t start = nowUs();
+        if (!m_Decoder.prepare(m_PrepWork.data.data(), m_PrepWork.data.size(), m_PrepWork.segments, m_PrepWork.criticalPackets)) {
+            m_Rejected++;
+            m_LastDecodeOk = false;
+            const uint64_t now = nowUs();
+            if (now - m_LastErrorLogUs.load() >= 1000000) {
+                m_LastErrorLogUs = now;
+                pwLog(ANDROID_LOG_WARN, "Dropped frame %d: %s (%u dropped so far)",
+                      m_PrepWork.frameNumber, m_Decoder.lastError().c_str(), m_Rejected.load());
+            }
+            continue;
+        }
+        m_PrepWork.partial = m_Decoder.lastFramePartial();
+        std::swap(m_PrepWork, m_PreparedFrame);
+        m_PreparedValid = true;
+        m_ParseUs = m_ParseUs.load() * 0.9 + double(nowUs() - start) * 0.1;
+        decoderLock.unlock();
+        m_PreparedReady.notify_one();
+    }
+}
+
+// Pre-parse mode, render thread: submits whatever the parse thread has prepared. Waiting for the decoder lock
+// also waits for a parse in progress, so the frame submitted is the newest one that has arrived.
+void Renderer::renderLoopPreparsed()
+{
+    m_PerfHint.start(4000000);
+    m_HintKind = m_PerfHint.kind();
+    if (setpriority(PRIO_PROCESS, 0, -8) != 0) {
+        pwLog(ANDROID_LOG_INFO, "Render thread priority boost was refused");
+    }
+
+    for (;;) {
+        paceForGpu();
+        waitForFreeSlot();
+
+        std::unique_lock<std::mutex> decoderLock(m_DecoderLock);
+        const auto ready = [this]() { return m_Stopping.load() || m_PreparedValid; };
+        const bool canWarm = g_KeepWarm.load(std::memory_order_relaxed) && m_HaveFrame && m_LastDecodeOk &&
+                             nowUs() - m_LastRealFrameUs < k_WarmIdleLimitUs;
+        bool warm = false;
+        if (canWarm) {
+            const std::chrono::steady_clock::time_point deadline{
+                std::chrono::microseconds(m_LastProcessUs + g_WarmPeriodUs.load(std::memory_order_relaxed)) };
+            warm = !m_PreparedReady.wait_until(decoderLock, deadline, ready);
+        }
+        else {
+            m_PreparedReady.wait(decoderLock, ready);
+        }
+        if (m_Stopping) {
+            m_PerfHint.stop();
+            return;
+        }
+
+        std::lock_guard<std::mutex> guard(m_RenderLock);
+        if (warm) {
+            // Nothing new has been parsed: decode the last real frame again (this parses it itself)
+            process(m_Working, true, &decoderLock, false);
+        }
+        else {
+            std::swap(m_PreparedFrame, m_Working);
+            m_PreparedValid = false;
+            m_HaveFrame = true;
+            m_LastRealFrameUs = nowUs();
+            process(m_Working, false, &decoderLock, true);
+        }
+    }
+}
+
+// Blocks until the submission that last used the next frame slot has finished on the GPU
+void Renderer::waitForFreeSlot()
+{
+    const uint32_t slot = m_FrameIndex % k_FramesInFlight;
+    if (m_RenderTimeline == VK_NULL_HANDLE || m_FrameValues[slot] == 0) {
+        return;
+    }
+    VkSemaphoreWaitInfo waitInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &m_RenderTimeline;
+    waitInfo.pValues = &m_FrameValues[slot];
+    vkWaitSemaphores(m_Vulkan.device(), &waitInfo, UINT64_MAX);
+}
+
+void Renderer::process(const Frame& frame, bool warm, std::unique_lock<std::mutex>* decoderLock, bool prepared)
 {
     if (!m_Swapchain.valid()) {
-        m_NoWindow++;
+        if (!warm) {
+            m_NoWindow++;
+        }
         return;
     }
 
@@ -741,62 +1111,108 @@ void Renderer::process(const Frame& frame)
         m_NeedRecreate = true;
     }
 
-    // The slot of the frames in flight this frame will use, as present() picks it. One frame
+    // The slot of the frames in flight this frame will use, as present() picks it. One real frame
     // in a few has its GPU stages timed: begin() writes the first timestamp.
     const int slot = int(m_FrameIndex % k_FramesInFlight);
-    const bool timed = m_GpuTimer.begin(slot, frame.enqueueUs);
+    const bool timed = !warm && m_GpuTimer.begin(slot);
 
     const uint64_t start = nowUs();
+    m_LastProcessUs = start;
     const int surface = m_NextSurface;
     uint64_t decodeValue = 0;
     const uint64_t released = m_SurfaceReleased[surface];
-    if (!m_Decoder.decode(frame.data.data(), frame.data.size(), frame.segments, frame.criticalPackets, surface,
-                          released != 0 ? m_RenderTimeline : VK_NULL_HANDLE, released, decodeValue)) {
+    const VkSemaphore waitSemaphore = released != 0 ? m_RenderTimeline : VK_NULL_HANDLE;
+    const bool decodedOk = prepared ?
+            m_Decoder.submit(surface, waitSemaphore, released, decodeValue) :
+            m_Decoder.decode(frame.data.data(), frame.data.size(), frame.segments, frame.criticalPackets, surface,
+                             waitSemaphore, released, decodeValue);
+    // The decoder's state belongs to whoever holds the lock: read what is needed, then let the parse thread go on
+    const bool partialFrame = decodedOk && m_Decoder.lastFramePartial();
+    const std::string failure = decodedOk ? std::string() : m_Decoder.lastError();
+    if (decoderLock != nullptr && decoderLock->owns_lock()) {
+        decoderLock->unlock();
+    }
+    if (!decodedOk) {
         if (timed) {
             m_GpuTimer.decoded(slot, false);
             m_GpuTimer.presented(slot, false);
         }
-        m_Rejected++;
-        // The next frame replaces this one; log at most once a second
-        const uint64_t now = nowUs();
-        if (now - m_LastErrorLogUs >= 1000000) {
-            m_LastErrorLogUs = now;
-            pwLog(ANDROID_LOG_WARN, "Dropped frame %d: %s (%u dropped so far)",
-                  frame.frameNumber, m_Decoder.lastError().c_str(), m_Rejected.load());
+        // Do not keep re-decoding a frame that failed
+        m_LastDecodeOk = false;
+        if (!warm) {
+            m_Rejected++;
+            // The next frame replaces this one; log at most once a second
+            const uint64_t now = nowUs();
+            if (now - m_LastErrorLogUs.load() >= 1000000) {
+                m_LastErrorLogUs = now;
+                pwLog(ANDROID_LOG_WARN, "Dropped frame %d: %s (%u dropped so far)",
+                      frame.frameNumber, failure.c_str(), m_Rejected.load());
+            }
         }
         return;
     }
     m_NextSurface = (m_NextSurface + 1) % k_SurfaceCount;
-    if (m_Decoder.lastFramePartial()) {
-        m_Partial++;
+    if (warm) {
+        m_WarmFrames++;
     }
-    m_Decoded++;
+    else {
+        if (partialFrame) {
+            m_Partial++;
+        }
+        m_Decoded++;
+        m_LastDecodeOk = true;
+    }
     if (timed) {
         m_GpuTimer.decoded(slot, true);
     }
 
     const uint64_t decoded = nowUs();
-    m_DecodeUs += decoded - start;
+
+    // The GPU starts this frame's decode when it finishes the previous work, or now if it is idle
+    const uint32_t gpuFrameUs = m_GpuTimer.frameEmaUs();
+    if (gpuFrameUs != 0) {
+        m_PredDoneUs = std::max<uint64_t>(decoded, m_PredDoneUs) + uint64_t(double(gpuFrameUs) * k_JitGpuScale);
+    }
+    if (!warm) {
+        m_CpuUs = m_CpuUs * 0.9 + double(decoded - start) * 0.1;
+    }
 
     const bool presented = present(surface, decodeValue, frame.colorspace);
-    if (presented) {
-        m_Presented++;
-    }
     if (timed) {
         m_GpuTimer.presented(slot, presented);
     }
     const uint64_t end = nowUs();
-    m_PresentUs += end - decoded;
 
-    // Slowest frame since the stats were last read
-    const uint32_t frameUs = uint32_t(std::min<uint64_t>(end - start, 1000000));
-    uint32_t peak = m_MaxFrameUs.load(std::memory_order_relaxed);
-    while (frameUs > peak && !m_MaxFrameUs.compare_exchange_weak(peak, frameUs)) {
+    // Re-decodes are not frames the host sent: the stats and the latency probe only count real ones
+    if (!warm) {
+        m_DecodeUs += decoded - start;
+        if (presented) {
+            m_Presented++;
+        }
+        m_PresentUs += end - decoded;
+
+        // One frame in four: how long from assembled to the GPU finishing it
+        if (presented && frame.enqueueUs != 0 && (++m_LatencySampleCounter % 4) == 0) {
+            m_LatencyProbe.sample(m_RenderValue, frame.enqueueUs);
+        }
+
+        // Slowest frame since the stats were last read
+        const uint32_t frameUs = uint32_t(std::min<uint64_t>(end - start, 1000000));
+        uint32_t peak = m_MaxFrameUs.load(std::memory_order_relaxed);
+        while (frameUs > peak && !m_MaxFrameUs.compare_exchange_weak(peak, frameUs)) {
+        }
+    }
+
+    // Every ten seconds, log the library's own per-stage GPU timings: where the decode time goes
+    if (!warm && end - m_LastStageReportUs >= 10000000) {
+        m_LastStageReportUs = end;
+        reportDecoderStages();
     }
 
     // Present mostly waits for the GPU to finish earlier frames, so it stands in for GPU time
     m_PerfHint.report(int64_t(start) * 1000, int64_t(end - start) * 1000,
-                      int64_t(decoded - start) * 1000, int64_t(end - decoded) * 1000);
+                      int64_t(decoded - start) * 1000,
+                      gpuFrameUs != 0 ? int64_t(gpuFrameUs) * 1000 : int64_t(end - decoded) * 1000);
 }
 
 bool Renderer::present(int surface, uint64_t decodeValue, int colorspace)
@@ -955,10 +1371,11 @@ void Renderer::stats(PW_RENDERER_STATS* out) const
     out->gpuSamples = m_GpuTimer.samples();
 
     out->assemblySumMs = m_AssemblySumMs;
-    out->clientTiming = m_GpuTimer.clientTiming();
-    out->clientSumUs = m_GpuTimer.clientSumUs();
-    out->clientSamples = m_GpuTimer.clientSamples();
-    out->clientMaxUs = m_GpuTimer.takeClientMaxUs();
+    out->clientTiming = m_LatencyProbe.enabled();
+    out->clientSumUs = m_LatencyProbe.sumUs();
+    out->clientSamples = m_LatencyProbe.samples();
+    out->clientMaxUs = m_LatencyProbe.takeMaxUs();
+    out->warmFrames = m_WarmFrames;
 }
 
 // Serializes the API entry points; the renderer exists between setup and cleanup
@@ -1019,6 +1436,22 @@ extern "C" int PwRendererSetup(int videoFormat, int width, int height, int frame
     }
     g_Renderer = std::move(renderer);
     return 0;
+}
+
+extern "C" void PwRendererSetKeepWarm(bool enabled, int refreshHz)
+{
+    g_WarmPeriodUs = (refreshHz >= 30 && refreshHz <= 240) ? uint32_t(1000000 / refreshHz) : 8333;
+    g_KeepWarm = enabled;
+}
+
+extern "C" void PwRendererSetPacing(bool justInTime)
+{
+    g_JitPacing = justInTime;
+}
+
+extern "C" void PwRendererSetPreParse(bool enabled)
+{
+    g_PreParse = enabled;
 }
 
 extern "C" void PwRendererSetWindow(ANativeWindow* window)

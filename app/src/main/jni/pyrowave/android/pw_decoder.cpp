@@ -273,6 +273,20 @@ bool PwDecoder::decode(const uint8_t* data, size_t size,
                        const std::vector<PyroWaveFraming::Segment>& packets, size_t criticalPackets,
                        int surfaceIndex, VkSemaphore waitSemaphore, uint64_t waitValue, uint64_t& decodeValue)
 {
+    return prepare(data, size, packets, criticalPackets) &&
+           submit(surfaceIndex, waitSemaphore, waitValue, decodeValue);
+}
+
+void PwDecoder::reportStages(void (*callback)(void* userdata, const char* message))
+{
+    if (m_Device != nullptr) {
+        pyrowave_device_report_performance_stats(m_Device, callback, nullptr, true);
+    }
+}
+
+bool PwDecoder::prepare(const uint8_t* data, size_t size,
+                        const std::vector<PyroWaveFraming::Segment>& packets, size_t criticalPackets)
+{
     m_LastFramePartial = false;
     if (!PyroWaveFraming::parse(data, size, packets, criticalPackets, m_Geometry, m_Parsed, m_LastError)) {
         return false;
@@ -312,7 +326,11 @@ bool PwDecoder::decode(const uint8_t* data, size_t size,
         }
     }
     m_LastFramePartial = m_Parsed.partial;
+    return true;
+}
 
+bool PwDecoder::submit(int surfaceIndex, VkSemaphore waitSemaphore, uint64_t waitValue, uint64_t& decodeValue)
+{
     const Surface& surface = m_Surfaces[size_t(surfaceIndex)];
     pyrowave_gpu_buffers buffers = {};
     for (int plane = 0; plane < 3; plane++) {

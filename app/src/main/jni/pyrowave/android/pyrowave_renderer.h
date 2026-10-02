@@ -64,6 +64,7 @@ typedef struct _PW_RENDERER_STATS {
     uint64_t clientSumUs;     // assembled -> GPU done, summed over clientSamples
     uint64_t clientSamples;
     uint32_t clientMaxUs;     // the largest since the previous call
+    uint32_t warmFrames;      // keep-warm re-decodes of the last frame (cumulative)
 } PW_RENDERER_STATS;
 
 // Whether this device can decode and present PyroWave (Vulkan 1.3 and the
@@ -86,6 +87,18 @@ void PwRendererCleanup(void);
 
 // DECODER_RENDERER_CALLBACKS.submitDecodeUnit for PyroWave streams
 int PwRendererSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
+
+// Keep the GPU busy while the host sends few frames: decode the last frame again once per
+// display refresh. Takes effect for the current and later streams.
+void PwRendererSetKeepWarm(bool enabled, int refreshHz);
+
+// Experimental: take each frame just in time for the GPU, which lowers latency when the GPU is the
+// bottleneck. Takes effect for the current and later streams.
+void PwRendererSetPacing(bool justInTime);
+
+// Experimental: parse each frame on a helper thread as soon as it arrives, so that the render thread only
+// has to submit it. Takes effect for the next stream.
+void PwRendererSetPreParse(bool enabled);
 
 void PwRendererGetStats(PW_RENDERER_STATS* stats);
 
