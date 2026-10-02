@@ -2,7 +2,8 @@
 
 For an agent picking up the PyroWave work on this repo. It separates what was
 **measured on a device** from what is **only compiled**, because the tablet was
-disconnected for the last stretch of work and three features have never run.
+disconnected for the last stretch of work and several features have never run
+(HDR10, the detailed overlay, GPU timing, client and end-to-end latency).
 
 Read `docs/PYROWAVE_DECODE_PATH.md` first for the design (how the native renderer
 maps onto Moonlight-Qt's). This file covers what happened after it.
@@ -10,20 +11,29 @@ maps onto Moonlight-Qt's). This file covers what happened after it.
 > **Update (second session): read section 10 first.** The active branch is now
 > `sync/derflacco-async` (rebased onto derflacco's async lineage), the app is called
 > PyroArt, and a batch of latency options was added that has **not been run on a device**.
-> Sections 1-9 describe the earlier state and remain accurate for what they measured.
+> Sections 1-9 describe the earlier state (the old branch `ccr-ea2408c2-mx41mg`) and remain
+> accurate for what they measured.
+
+Revision note: written at `fd537a0c`, then reviewed and corrected after `695c576d`
+(a later session, see section 3) changed the frame queue, the default bitrate and the
+game-mode settings. Where this file and the code disagree, the code wins.
 
 ## 1. Status in one screen
 
 - PyroWave streaming works end to end on a Galaxy Tab S9 Ultra against a Windows
-  host. Branch `ccr-ea2408c2-mx41mg`, pushed, working tree clean at `39f43a6f`
-  (later: `695c576d`, see section 10).
-- **Stutter was Wi-Fi loss from far too high a bitrate**, not the tablet. Fixed by
-  setting a bitrate of about 100 Mbps (verified, section 5.1).
+  host. Old branch `ccr-ea2408c2-mx41mg`, pushed; HEAD was `695c576d` when this was reviewed
+  (the active branch is now `sync/derflacco-async`, section 10).
+- **Stutter was Wi-Fi loss from far too high a bitrate**, not the tablet. Setting a bitrate of
+  about 100 Mbps fixed it (verified, section 5.1). `695c576d` now also caps the *default*
+  PyroWave bitrate at 120 Mbps on Wi-Fi; that cap is derived from the same measurements but the
+  commit does not say it was run on a device. (That cap is not on the sync branch, which has a
+  separate PyroWave bitrate slider instead.)
 - **The remaining limit is the Adreno GPU clock**: fps tracks the clock almost step
   for step, and Android's governor leaves it low (verified, section 5.2). A
   performance-hint session was added to ask for more clock. Version 1 only delayed
   the drop. **Version 2 (tighter target, repeated hints) was installed but never
-  evaluated.**
+  evaluated.** `695c576d` adds further attempts (game category and game mode, sustained
+  performance mode on Android 12+, render thread priority); their effect is not recorded.
 - Added but **never run on a device**: 10-bit / HDR10 output, the detailed overlay
   with GPU timing, and client / end-to-end latency (section 6).
 - Nothing here has been tested on the other two intended devices (Poco F6 Pro,
@@ -36,7 +46,7 @@ maps onto Moonlight-Qt's). This file covers what happened after it.
 | Dev machine | Windows 11, repo `C:\Users\jerro\Development\Artemide-pyro`, PowerShell 5.1 and Git Bash |
 | Remote / branch | `origin` = `github.com/jerrolds/Artemide-pyro`; work branch `ccr-ea2408c2-mx41mg`; main branch `moonlight-noir`. The user has authorised every push so far to the work branch. |
 | Tablet | Galaxy Tab S9 Ultra `SM-X910`, Android 16, One UI 8.0.5, Snapdragon 8 Gen 2, Adreno 740, panel 2960x1848 at 120 Hz (modes 120/60/30 only) |
-| Host | Windows PC `Jerrold-PC`, 192.168.2.161 (a Sunshine-family host with the PyroWave extension; launch uses `virtualDisplay=1`). Other hosts seen: THEATER-PC 192.168.2.130, CONSOLE 192.168.2.20. |
+| Host | Windows PC `Jerrold-PC`, 192.168.2.161. The host software was never identified: it speaks the Sunshine protocol with a PyroWave extension, the launch request carries `virtualDisplay=1`, and the 503 error text talks about streamed virtual displays, which suggests a Sunshine fork with virtual-display support (inferred). Other hosts seen: THEATER-PC 192.168.2.130, CONSOLE 192.168.2.20. |
 | Network | 5 GHz Wi-Fi 6, tablet RSSI -50 to -67 dBm, receive rate 288-1080 Mbps, transmit rate often far lower |
 | Other targets | Poco F6 Pro (8 Gen 2, same GPU) and Galaxy Tab S8 Ultra (8 Gen 1, Adreno 730, same 2960x1848 panel). Same arm64 APK; untested. |
 
@@ -47,9 +57,11 @@ Run `adb devices -l`; if empty, `adb connect <ip>:<port from the Wireless debugg
 
 | Commit | What |
 |---|---|
+| `695c576d` | By a later session (the user, co-authored by Claude), after this handoff: default PyroWave bitrate capped at 120 Mbps on Wi-Fi (`PYROWAVE_WIFI_DEFAULT_KBPS`, `isOnWifi()` in `Game.java`, with a toast and log line); `android:appCategory="game"` and `supportsPerformanceGameMode="true"`; `setSustainedPerformanceMode` moved out of the Android 11 branch so it runs on Android 12+ when `isSustainedPerformanceModeSupported()`; **queue reverted to 3 surfaces, 2 in flight, 3 swapchain images**; `waitForFreeSlot()` before taking a frame so the newest is decoded; render thread `setpriority(-8)` |
+| `fd537a0c` | This handoff |
 | `39f43a6f` | Client latency (assembled to GPU done) and an end-to-end estimate in the overlay |
 | `ee6b31b3` | 10-bit HDR10 output, and the detailed stats overlay with GPU timing |
-| `5d227203` | Performance-hint session, frames in flight 2 to 3, decoded surfaces 3 to 4, swapchain images 3 to 4 |
+| `5d227203` | Performance-hint session; also frames in flight 2 to 3, surfaces 3 to 4, swapchain images 3 to 4 (**those three queue sizes were reverted by `695c576d`**) |
 | `372432e1` | Overlay: bandwidth and host processing latency (the user's own work, committed as-is). It equals the working tree at the start of the session (`4b53647b` plus those three uncommitted files), so it is the best reconstruction of "the build that worked the night before"; that equivalence is inferred, not proven. |
 | `4b53647b` | Wire the native renderer into the app |
 | `ab3e5e92` | Vendor the codec and add the native decoder/renderer. **PyroWave is not selectable in the app at this commit.** |
@@ -58,6 +70,12 @@ Run `adb devices -l`; if empty, `adb connect <ip>:<port from the Wireless debugg
 subject (a PowerShell here-string artefact). Fixing it needs a force-push, so it was left.
 Write commit messages to a file and use `git commit -F file`; do not pipe a PowerShell
 here-string.
+
+The hashes above are those of the old branch `ccr-ea2408c2-mx41mg`. This file lives on
+`sync/derflacco-async`, which holds rewritten copies of those commits (different hashes, for example
+`aa43a879` is the first version of this handoff) on top of derflacco's async lineage, plus the work in
+section 10. The two branches have diverged a long way (436 commits on the sync side, 40 on the old
+side at the last fetch); do not merge them without asking the user.
 
 ## 4. Building, signing, installing (tool traps included)
 
@@ -96,6 +114,9 @@ here-string.
 - With PyroWave and an unchanged bitrate, `Game.java` replaces it with
   `getDefaultPyroWaveBitrate` = 1.6 bits per pixel x width x height x fps, clamped to
   20-900 Mbps: about 900 Mbps at 2960x1848x120, 398 Mbps at 1080p120, 199 Mbps at 1080p60.
+  That was the whole problem. Since `695c576d`, `Game.java` also caps this default at
+  `PYROWAVE_WIFI_DEFAULT_KBPS` (120 Mbps) when the active network is Wi-Fi (`isOnWifi()`;
+  Ethernet is not capped) and shows a toast and a log line `PyroWave default bitrate: ...`.
   `bitrateIsDefault` is true when the saved value equals the default for the current
   resolution and fps, in which case a user value is ignored, so never set exactly the default.
 - The real rate follows the picture: about 57 Mbps on a static desktop, 220-500+ Mbps on video
@@ -103,7 +124,8 @@ here-string.
 - Symptoms: moonlight-common-c logs `Unrecoverable frame`, `Network dropped`, `Delivering
   frame ... without N of M data packets`; PyroWave logs `Dropped frame ...`; overlay shows
   hundreds to thousands of undecodable frames per 10 s. The tablet's UDP receive buffer was not
-  the cause (`RcvbufErrors` stayed at 14); packets were lost over the air.
+  the cause (`/proc/net/snmp` `RcvbufErrors` went from 0 to only 14 over the whole session, while
+  the loss was thousands of frames); packets were lost before reaching the tablet.
 - A bitrate of about 100 Mbps (saved as 108,500 kbps) gave zero undecodable frames at 2960x1848
   while a game ran, and 162-230 Mbps on the wire. The on-the-wire rate is **about twice the
   nominal setting** (error correction and overshoot; not investigated further). The link carried
@@ -133,14 +155,18 @@ Time-aligned samples (GPU `cur_freq` against the app's per-second perf log line)
 
 ### 5.3 What the overlay numbers mean
 - **CPU decode** is the CPU time to parse, push packets and record/submit the decode (about
-  1.6 ms in release at 2960x1848; 15.8 ms in the first debug photo). The decode itself runs
-  later on the GPU.
+  1.6 ms in the release build at 2960x1848; 15.8 ms in the very first overlay photo, which was a
+  debug build at a much higher bitrate). The decode itself runs later on the GPU.
 - **Present** is CPU wall time in `present()`, which blocks (`UINT64_MAX`) on the previous
   frame's GPU work and on a free swapchain image; it is mostly GPU wait, not CPU work.
 - Neither equals HEVC's "Average decoding time", which is MediaCodec enqueue-to-dequeue
   latency. The new "GPU time: decode" line is the closest equivalent (untested, section 6).
-- Debug builds compile the native code unoptimised (`ndk-build` with `APP_OPTIM=debug`); the
-  release build is far faster on the CPU side. Always profile release builds.
+- Debug versus release: the CPU decode figure dropped from 15.8 ms to about 1.6 ms when the user
+  moved to the release build, but the build type, the bitrate and the content all changed at once,
+  so how much of that is the build type is **unproven**. The expectation that `ndk-build` compiles a
+  debuggable variant without optimisation was never confirmed (neither `Application.mk` nor
+  `build.gradle` sets `APP_OPTIM`; the compiler flags actually used were not inspected). Profile
+  release builds, and if the attribution matters, compare two builds with the same bitrate and content.
 
 ### 5.4 Other observations
 - `Too much pending audio data: 40-65 ms` bursts (the audio queue drops packets above 40 ms)
@@ -149,15 +175,17 @@ Time-aligned samples (GPU `cur_freq` against the app's per-second perf log line)
   which looks like a host-side virtual-display state problem (the host answered the HTTP request;
   nothing on the tablet was wrong). A later launch started normally. Not investigated.
 - Samsung settings found: `sem_enhanced_cpu_responsiveness=0` ("Enhanced processing" in
-  Settings, off); Game Booster / `gametools` is installed but the app is not registered as a
-  game. Neither was tried.
+  Settings, off); Game Booster / `gametools` is installed. At the time the app was not registered as
+  a game; `695c576d` has since added `android:appCategory="game"` and Game Mode support, which
+  has not been evaluated here. Enhanced processing was never tried.
 
 ## 6. Features added and their state
 
 | Feature | Where | State |
 |---|---|---|
 | Performance hint session (graphics pipeline on Android 16, plain on 13-15, none below 13), reports CPU/GPU time per frame; v2 uses a 7.5 ms target and re-sends the workload-increase notice while frames miss it | `PerfHint` in `pyrowave_renderer.cpp` | v1 measured: held 120+ for about 3 minutes instead of 1-2, then still fell to about 75 fps at 295 MHz. **v2 untested.** |
-| Frames in flight 3, surfaces 4, swapchain images 4 | `k_FramesInFlight`, `k_SurfaceCount`, `pw_swapchain.cpp` | Measured: no change to the clock or fps. Kept; may add up to a frame of latency. |
+| Frame queue depth | `k_FramesInFlight`, `k_SurfaceCount`, `pw_swapchain.cpp`, `waitForFreeSlot()` | Tried 3 in flight / 4 surfaces / 4 images: measured no change to the clock or fps. **Reverted by `695c576d` to 2 / 3 / 3**, which also waits for a free slot before taking a frame (so the decoded frame is the newest) and sets the render thread to `setpriority(-8)`. The shallower queue is unmeasured; it should cost less latency. |
+| Game category, Game Mode, sustained performance mode (Android 12+) | `AndroidManifest.xml`, `game_mode_config.xml`, `Game.java` `surfaceChanged` | Added by `695c576d`; **no measurement recorded.** The sustained-performance call previously never ran on Android 12+ because it sat inside the Android 11 branch. Samsung may or may not honour it for GPU clocks. |
 | 10-bit / HDR10 | `Game.java` requests `VIDEO_FORMAT_PYROWAVE_HDR10` when Enable HDR is on and PyroWave is forced; `NvConnection` counts `SCM_PYROWAVE_HDR10` in the host check; swapchain follows each frame's `hdrActive` (A2B10G10R10 + `HDR10_ST2084`, metadata from `LiGetHdrMetadata`), falling back to SDR | **Compiled only.** Needs a host that offers PyroWave HDR10. The overlay Output line should read `HDR10`, or `10-bit SDR` if it fell back. In the protocol, 10-bit and HDR are one switch (as in Moonlight-Qt, which filters its format list). 4:4:4 constants exist but there is no setting. |
 | Detailed overlay and log line (format, GPU, pipeline, video data, packets, arrival jitter, slowest frame, GPU time) | `PyroWaveRenderer.java`, `strings.xml`, stats array indices 0-31 | **Compiled only.** Log line `PyroWave detail:` follows the existing perf line. |
 | GPU timing | `GpuTimer`: tiny command buffers on the same queue write timestamps before the decode, after it, and after the colour conversion, on 1 frame in 8 | **Compiled only.** Needs `hostQueryReset` and `timestampValidBits >= 32`. Check the decode figure is not about 0 (that would mean the library's submit is deferred past our second stamp). |
@@ -169,7 +197,8 @@ Keep all three in step.
 
 ## 6a. Key files
 
-- Java: `Game.java` (stream setup around lines 697-760, HDR at 589+), `PyroWaveRenderer.java`
+- Java: `Game.java` (line numbers drift; search for `FORCE_PYROWAVE` for the format and bitrate
+  setup, `willStreamHdr` for HDR, `isOnWifi` for the Wi-Fi cap), `PyroWaveRenderer.java`
   (overlay and stats thread), `MediaCodecDecoderRenderer.java` (owns the renderer),
   `MoonBridge.java`, `NvConnection.java` (HDR negotiation, ~line 256),
   `PreferenceConfiguration.java` (default PyroWave bitrate).
@@ -196,21 +225,25 @@ Keep all three in step.
 
 ## 8. Suggested next steps, in order
 
-1. Reconnect the tablet and install the latest build. The tablet currently has a release build
-   from before the HDR / overlay / latency work (it has hint v2 but none of section 6's compiled-only
-   features), package `com.limelight.noir`.
+1. Reconnect the tablet and install a build of the current HEAD (the last build the previous session
+   installed predates the HDR / overlay / latency work; it had hint v2 but none of section 6's
+   compiled-only features). Package `com.limelight.noir`. Check `git log -1` and what `695c576d`
+   changed before assuming anything about the queue depth.
 2. **Smoke test the compiled-only features**: app starts, overlay shows the new lines, no Vulkan
    validation errors in logcat, GPU time and client latency are plausible, and fps and present time
    are no worse than the baseline (about 122 fps, present about 6.3 ms at 475 MHz).
-3. **Evaluate hint v2**: stream a game for 5+ minutes with an alt-tab out and back; does the clock hold
-   475 MHz? If not, try, in this order: `android:appCategory="game"` in the manifest (so Samsung's
-   Game Booster applies its profile), `GameManager`, the Samsung "Enhanced processing" setting, then
-   lower the stream resolution (2560x1600 or 1920x1200) to cut GPU work per frame.
+3. **Evaluate the clock work**: stream a game for 5+ minutes with an alt-tab out and back; does the
+   clock hold 475 MHz? The game category, Game Mode, sustained-performance and render-priority changes
+   in `695c576d` and hint v2 are all untested, so test them together first and then bisect if it
+   still falls. If it does, remaining options: the Samsung "Enhanced processing" setting, `GameManager`
+   (the app can report its state), then lowering the stream resolution (2560x1600 or 1920x1200) to cut
+   GPU work per frame.
 4. Test HDR10 against a host that advertises `SCM_PYROWAVE_HDR10`; check the Output line and the
    tablet's HDR indicator.
 5. Cap the game at 120 fps on the host and re-measure bandwidth, superseded count and fps.
-6. Open questions: why the wire rate is about twice the setting; the audio-backlog bursts; whether
-   3 frames in flight costs latency; a 4:4:4 setting if wanted.
+6. Open questions: why the wire rate is about twice the setting; the audio-backlog bursts; whether the
+   120 Mbps Wi-Fi default is the right value for the tablet and for the other two devices; a 4:4:4
+   setting if wanted.
 7. Test the same APK on the Poco F6 Pro (set battery to No restrictions) and Tab S8 Ultra (slower
    Adreno 730; needs a Vulkan 1.3 driver, Android 13+ for the hint API).
 
@@ -227,6 +260,16 @@ Keep all three in step.
   `setSustainedPerformanceMode` out of the Android 11 branch. Those three are **not** on the sync
   branch; cherry-pick them if wanted. The rest of that commit is superseded.
 - Build in a short worktree (e.g. `C:\w\s`) because of the Windows path limit.
+
+### 10.1a Why a deployed build can look wrong
+The build installed on the tablet by another session came from `ccr-ea2408c2-mx41mg`, so it had no
+PyroWave bitrate slider (it reused the normal Bitrate setting, capped at 120 Mbps on Wi-Fi and
+shown only as a toast), no PyroArt name and none of the options below. Check the branch and
+`git log -1` of the checkout that built an APK before judging it. Also: the release APK is signed
+with the building machine's own debug key and keeps the package `com.limelight.noir`, so a build
+from another machine cannot update it in place (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Fixes:
+uninstall first (loses settings and pairing), share one `debug.keystore` between machines, or give
+the release a distinct `applicationIdSuffix`.
 
 ### 10.2 What was added (all on the sync branch, all compiled, **none run on the device**)
 | Feature | Setting (PyroWave section) | Notes |
